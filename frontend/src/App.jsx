@@ -1011,7 +1011,7 @@ function App() {
       {/* 页脚 */}
       <footer className="bg-gray-800 text-gray-300 py-4 mt-8">
         <div className="container mx-auto px-4 text-center">
-          <p>SciDataExtractor - 为土木工程研究者设计</p>
+          <p>SciDataExtractor</p>
         </div>
       </footer>
     </div>
