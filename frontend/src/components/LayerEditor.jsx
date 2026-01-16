@@ -5,13 +5,14 @@ import useImage from 'use-image'
 const API_BASE = 'http://localhost:8000'
 
 /**
- * LayerEditor - Photoshop 风格的图层编辑器 v2.0
+ * LayerEditor - Photoshop 风格的图层编辑器 v2.1
  *
  * 新功能:
  * - 自动检测曲线并显示轮廓线
  * - 颜色按钮切换显示不同曲线
  * - 支持用户编辑轮廓线
  * - 基于编辑后的轮廓提取数据
+ * - SAM 2 智能分割支持 (Meta 2024)
  */
 const LayerEditor = ({
   sessionId,
@@ -30,6 +31,7 @@ const LayerEditor = ({
   const [drawingPoints, setDrawingPoints] = useState([]) // 当前绘制的点
   const [isLoading, setIsLoading] = useState(false)
   const [message, setMessage] = useState('')
+  const [samStatus, setSamStatus] = useState(null) // SAM 2 状态
 
   // Canvas 相关
   const [image] = useImage(imageUrl, 'anonymous')
@@ -64,6 +66,21 @@ const LayerEditor = ({
       setImageSize({ width: image.width, height: image.height })
     }
   }, [image])
+
+  // ========== 检查 SAM 2 状态 ==========
+  useEffect(() => {
+    const checkSamStatus = async () => {
+      try {
+        const response = await fetch(`${API_BASE}/process/sam-status`)
+        const data = await response.json()
+        setSamStatus(data)
+      } catch (error) {
+        console.error('检查 SAM 状态失败:', error)
+        setSamStatus({ available: false, model_type: 'unknown' })
+      }
+    }
+    checkSamStatus()
+  }, [])
 
   // ========== 自动检测曲线 ==========
   const handleDetectCurves = async () => {
@@ -453,6 +470,20 @@ const LayerEditor = ({
               className="w-20"
             />
             <span className="text-sm text-gray-600">{brushSize}px</span>
+          </div>
+        )}
+
+        {/* SAM 2 状态指示器 */}
+        {samStatus && (
+          <div className={`flex items-center gap-2 border-l pl-2 ml-2 px-3 py-1 rounded-lg text-sm ${
+            samStatus.available ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'
+          }`}>
+            <span className={`w-2 h-2 rounded-full ${samStatus.available ? 'bg-green-500' : 'bg-yellow-500'}`}></span>
+            <span>
+              {samStatus.available
+                ? `${samStatus.model_info?.is_sam2 ? 'SAM 2' : 'SAM'} (${samStatus.model_info?.device || 'CPU'})`
+                : '备用分割模式'}
+            </span>
           </div>
         )}
 

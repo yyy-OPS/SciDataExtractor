@@ -485,9 +485,9 @@ async def sam_predict(request: SAMPredictRequest):
         if image is None:
             raise HTTPException(status_code=500, detail="无法读取图像")
 
-        # 获取分割器
+        # 获取分割器 (使用 SAM 2)
         if SAM_AVAILABLE:
-            segmenter = get_segmenter()
+            segmenter = get_segmenter("sam2_b")  # 使用 SAM 2 Base 模型
             mask = segmenter.segment_click(
                 image,
                 (request.point_x, request.point_y),
@@ -549,7 +549,7 @@ async def sam_multi_point(request: SAMMultiPointRequest):
         labels = [p.get("label", 1) for p in request.points]
 
         if SAM_AVAILABLE:
-            segmenter = get_segmenter()
+            segmenter = get_segmenter("sam2_b")  # 使用 SAM 2 Base 模型
             mask = segmenter.segment_multi_points(image, points, labels)
         else:
             # 备用方法：使用第一个前景点

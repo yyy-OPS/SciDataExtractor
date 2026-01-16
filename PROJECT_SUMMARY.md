@@ -1,8 +1,13 @@
-# SciDataExtractor v2.0 - 项目实现总结
+# SciDataExtractor v2.1 - 项目实现总结
 
 ## 📋 项目概述
 
 本次更新为 SciDataExtractor 添加了完整的 **"Human-in-the-Loop"（人机回圈）分层提取系统**，专门用于处理 LS-DYNA 冲击力时程曲线中的"多线重叠"和"高频震荡密集"区域。
+
+### v2.1 更新内容
+- **SAM 2 (Segment Anything Model 2)** - Meta 2024 最新分割模型
+- **高级曲线检测器** - 多尺度边缘检测、贝塞尔曲线拟合
+- **改进的曲线追踪算法** - 带方向引导的动量追踪
 
 ### 核心理念
 ```
@@ -82,31 +87,53 @@ for each_step:
 - ✅ 自动跳过小间隙
 - ✅ 鲁棒性强
 
-#### 1.3 SAM 智能分割
+#### 1.3 SAM 2 智能分割
 **文件：** `backend/ai_segmentation.py`
 
 **类：** `SmartSegmenter`
 
 **功能：**
-- 封装 Segment Anything Model (SAM)
+- 封装 SAM 2 (Segment Anything Model 2) - Meta 2024
+- 支持 SAM 2 多种模型: sam2_t (Tiny), sam2_b (Base), sam2_l (Large)
+- 自动降级到 SAM 1 (如果 SAM 2 不可用)
 - 支持点击分割、框选分割、多点分割
-- GPU 加速支持
+- GPU 加速支持 (CUDA / Apple MPS)
 - 备用分割方法（基于颜色的区域生长 + GrabCut）
 
 **方法：**
 - `segment_click(image, point, point_label)`: 单点分割
 - `segment_box(image, box)`: 框选分割
 - `segment_multi_points(image, points, labels)`: 多点分割
+- `get_model_info()`: 获取当前模型信息
 
 **备用方案：**
 ```python
-# 如果 SAM 不可用，使用备用方法
-1. HSV 颜色分割
-2. FloodFill 区域生长
-3. GrabCut 精细分割
+# 如果 SAM 2 不可用，自动降级
+1. 尝试 SAM 2 → 失败则尝试 SAM 1
+2. SAM 1 也失败则使用备用方法:
+   - HSV 颜色分割
+   - FloodFill 区域生长
+   - GrabCut 精细分割
 ```
 
-#### 1.4 图层管理器
+#### 1.4 高级曲线检测器
+**文件：** `backend/ai_segmentation.py`
+
+**类：** `AdvancedCurveDetector`
+
+**功能：**
+- 多尺度边缘检测 (0.5x, 1.0x, 1.5x)
+- 带方向引导的曲线追踪
+- 贝塞尔曲线拟合
+- 线段检测 (LSD 算法)
+
+**方法：**
+- `detect_curves_multi_scale(image, scales)`: 多尺度曲线检测
+- `trace_curve_with_direction(skeleton, start_point, preferred_direction)`: 方向引导追踪
+- `fit_bezier_curve(points, num_control_points)`: 贝塞尔曲线拟合
+- `detect_line_segments(image, min_length)`: 线段检测
+
+#### 1.5 图层管理器
 **文件：** `backend/ai_segmentation.py`
 
 **类：** `CurveLayerManager`
@@ -608,14 +635,16 @@ search_radius = 2-5    # 断点搜索半径
 
 本项目使用了以下开源技术：
 
-- **Segment Anything Model (SAM)** - Meta AI
-- **Ultralytics** - YOLO/SAM 实现
+- **Segment Anything Model 2 (SAM 2)** - Meta AI 2024
+- **Ultralytics** - YOLO/SAM/SAM2 实现
 - **FastAPI** - 现代 Python Web 框架
 - **React** - 前端框架
 - **Konva** - Canvas 渲染库
 - **OpenCV** - 计算机视觉库
 - **scikit-learn** - 机器学习库
 - **scikit-image** - 图像处理库
+- **PyTorch** - 深度学习框架
+- **timm** - PyTorch Image Models
 
 ---
 
@@ -625,7 +654,7 @@ search_radius = 2-5    # 断点搜索半径
 
 ---
 
-**项目版本：** v2.0.0
+**项目版本：** v2.1.0
 **完成日期：** 2026-01-16
 **开发者：** yyy-OPS (AI 辅助开发)
 
