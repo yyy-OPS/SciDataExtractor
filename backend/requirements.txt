@@ -13,6 +13,12 @@ httpx==0.26.0
 python-dotenv==1.0.0
 
 # AI 分割和聚类依赖
-ultralytics==8.1.0      # 用于 YOLO/SAM
+ultralytics>=8.2.0      # 用于 YOLO/SAM/SAM2
 torch>=2.1.0            # PyTorch 后端
+torchvision>=0.16.0     # 视觉模型支持
 scikit-learn            # 用于 K-Means 颜色聚类
+
+# 高级曲线检测算法
+segment-anything-2      # SAM 2 模型 (Meta 2024)
+transformers>=4.36.0    # Transformer 模型支持
+timm>=0.9.0             # PyTorch Image Models

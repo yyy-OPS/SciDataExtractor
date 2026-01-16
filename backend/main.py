@@ -19,7 +19,7 @@ from image_processor import ImageProcessor
 
 # 导入 AI 分割模块
 try:
-    from ai_segmentation import SmartSegmenter, get_segmenter, CurveLayerManager
+    from ai_segmentation import SmartSegmenter, get_segmenter, CurveLayerManager, AdvancedCurveDetector, get_curve_detector
     SAM_AVAILABLE = True
 except ImportError:
     SAM_AVAILABLE = False
@@ -736,22 +736,27 @@ async def composite_preview(request: CompositePreviewRequest):
 @app.get("/process/sam-status")
 async def sam_status():
     """
-    检查 SAM 模型状态
+    检查 SAM/SAM2 模型状态
     """
     if SAM_AVAILABLE:
-        segmenter = get_segmenter()
+        segmenter = get_segmenter("sam2_b")  # 默认使用 SAM 2
         is_ready = segmenter.is_available()
+        model_info = segmenter.get_model_info()
         return {
             "available": SAM_AVAILABLE,
             "ready": is_ready,
-            "device": segmenter.device if is_ready else None,
-            "message": "SAM 模型已就绪" if is_ready else "SAM 模型正在加载或不可用"
+            "device": model_info.get("device"),
+            "model_type": model_info.get("model_type"),
+            "is_sam2": model_info.get("is_sam2", False),
+            "message": f"{'SAM 2' if model_info.get('is_sam2') else 'SAM 1'} 模型已就绪 ({model_info.get('device', 'unknown')})" if is_ready else "模型正在加载或不可用"
         }
     else:
         return {
             "available": False,
             "ready": False,
             "device": None,
+            "model_type": None,
+            "is_sam2": False,
             "message": "SAM 模块未安装，请运行: pip install ultralytics torch"
         }
 
