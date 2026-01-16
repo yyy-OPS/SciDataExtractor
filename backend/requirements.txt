@@ -11,3 +11,8 @@ pydantic==2.5.3
 openai==1.12.0
 httpx==0.26.0
 python-dotenv==1.0.0
+
+# AI 分割和聚类依赖
+ultralytics==8.1.0      # 用于 YOLO/SAM
+torch>=2.1.0            # PyTorch 后端
+scikit-learn            # 用于 K-Means 颜色聚类
