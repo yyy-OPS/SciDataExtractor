@@ -5,14 +5,13 @@ import useImage from 'use-image'
 const API_BASE = 'http://localhost:8000'
 
 /**
- * LayerEditor - Photoshop 风格的图层编辑器
+ * LayerEditor - Photoshop 风格的图层编辑器 v2.0
  *
- * 功能:
- * - 自动分层 (K-Means)
- * - 图层列表管理 (显隐、选择、删除)
- * - 工具箱: 画笔、橡皮、魔棒 (SAM)
- * - 实时预览合成效果
- * - 导出图层用于数据提取
+ * 新功能:
+ * - 自动检测曲线并显示轮廓线
+ * - 颜色按钮切换显示不同曲线
+ * - 支持用户编辑轮廓线
+ * - 基于编辑后的轮廓提取数据
  */
 const LayerEditor = ({
   sessionId,
@@ -22,23 +21,27 @@ const LayerEditor = ({
   calibrationPoints
 }) => {
   // ========== 状态管理 ==========
-  const [layers, setLayers] = useState([]) // 图层列表
-  const [selectedLayerId, setSelectedLayerId] = useState(null) // 当前选中图层
-  const [tool, setTool] = useState('select') // 当前工具: select, brush, eraser, magic_wand
-  const [brushSize, setBrushSize] = useState(10)
+  const [curves, setCurves] = useState([]) // 检测到的曲线列表
+  const [selectedCurveId, setSelectedCurveId] = useState(null) // 当前选中曲线
+  const [overlayImage, setOverlayImage] = useState(null) // 叠加预览图
+  const [tool, setTool] = useState('select') // 当前工具: select, draw, erase
+  const [brushSize, setBrushSize] = useState(5)
   const [isDrawing, setIsDrawing] = useState(false)
-  const [compositePreview, setCompositePreview] = useState(null)
+  const [drawingPoints, setDrawingPoints] = useState([]) // 当前绘制的点
   const [isLoading, setIsLoading] = useState(false)
   const [message, setMessage] = useState('')
 
   // Canvas 相关
   const [image] = useImage(imageUrl, 'anonymous')
+  const [previewImage] = useImage(overlayImage, 'anonymous')
   const [stageSize, setStageSize] = useState({ width: 800, height: 600 })
   const [scale, setScale] = useState(1)
   const [stagePos, setStagePos] = useState({ x: 0, y: 0 })
   const stageRef = useRef(null)
-  const drawingLayerRef = useRef(null)
   const lastPointRef = useRef(null)
+
+  // 图像尺寸
+  const [imageSize, setImageSize] = useState({ width: 0, height: 0 })
 
   // ========== 初始化 ==========
   useEffect(() => {
@@ -58,291 +61,226 @@ const LayerEditor = ({
       }
 
       setStageSize({ width: newWidth, height: newHeight })
+      setImageSize({ width: image.width, height: image.height })
     }
   }, [image])
 
-  // ========== 自动分层 ==========
-  const handleAutoDetectLayers = async () => {
+  // ========== 自动检测曲线 ==========
+  const handleDetectCurves = async () => {
     if (!sessionId) {
       setMessage('请先上传图片')
       return
     }
 
     setIsLoading(true)
-    setMessage('正在自动识别颜色图层...')
+    setMessage('正在检测曲线轮廓...')
 
     try {
-      const response = await fetch(`${API_BASE}/process/auto-layers`, {
+      const response = await fetch(`${API_BASE}/process/detect-curves`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           session_id: sessionId,
           k: 5,
-          exclude_background: true,
-          min_saturation: 30
+          min_saturation: 30,
+          min_contour_length: 50
         })
       })
 
       const data = await response.json()
 
       if (data.success) {
-        // 转换图层数据格式
-        const newLayers = data.layers.map((layer, index) => ({
-          id: `layer_${Date.now()}_${index}`,
-          name: layer.name,
-          maskBase64: layer.mask,
-          colorRgb: layer.color_rgb,
-          colorHsv: layer.color_hsv,
-          opacity: 0.5,
-          visible: true,
-          locked: false,
-          pixelCount: layer.pixel_count,
-          percentage: layer.percentage
-        }))
-
-        setLayers(newLayers)
-        if (newLayers.length > 0) {
-          setSelectedLayerId(newLayers[0].id)
+        setCurves(data.curves)
+        setOverlayImage(data.original_with_overlay)
+        if (data.curves.length > 0) {
+          setSelectedCurveId(data.curves[0].id)
         }
-        setMessage(`成功识别 ${newLayers.length} 个颜色图层`)
-
-        // 生成合成预览
-        updateCompositePreview(newLayers, newLayers[0]?.id)
+        setMessage(`成功检测到 ${data.count} 条曲线，点击颜色按钮切换显示`)
       } else {
-        setMessage(`自动分层失败: ${data.message}`)
+        setMessage(`曲线检测失败: ${data.message}`)
       }
     } catch (error) {
-      setMessage(`自动分层错误: ${error.message}`)
+      setMessage(`曲线检测错误: ${error.message}`)
     } finally {
       setIsLoading(false)
     }
   }
 
-  // ========== 魔棒工具 (SAM) ==========
-  const handleMagicWandClick = async (x, y) => {
-    if (!sessionId || !selectedLayerId) {
-      setMessage('请先选择一个图层')
-      return
-    }
-
-    setIsLoading(true)
-    setMessage('正在智能分割...')
+  // ========== 更新叠加预览 ==========
+  const updateOverlay = async (curveList, selectedId) => {
+    if (!sessionId || curveList.length === 0) return
 
     try {
-      // 转换坐标到原图尺寸
-      const imageX = Math.round((x - stagePos.x) / scale)
-      const imageY = Math.round((y - stagePos.y) / scale)
-
-      const response = await fetch(`${API_BASE}/process/sam-predict`, {
+      const response = await fetch(`${API_BASE}/process/curve-overlay`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           session_id: sessionId,
-          point_x: imageX,
-          point_y: imageY,
-          point_label: 1
+          curves: curveList,
+          selected_curve_id: selectedId,
+          show_skeleton: true,
+          show_contour: false,
+          line_width: 2
         })
       })
 
       const data = await response.json()
-
       if (data.success) {
-        // 合并到当前图层
-        await mergeMaskToLayer(selectedLayerId, data.mask, 'union')
-        setMessage('智能分割成功，已合并到当前图层')
-      } else {
-        setMessage(`智能分割失败: ${data.message}`)
+        setOverlayImage(data.overlay_image)
       }
     } catch (error) {
-      setMessage(`智能分割错误: ${error.message}`)
-    } finally {
-      setIsLoading(false)
+      console.error('更新叠加预览失败:', error)
     }
   }
 
-  // ========== 合并掩码到图层 ==========
-  const mergeMaskToLayer = async (layerId, newMaskBase64, operation = 'union') => {
-    const layer = layers.find(l => l.id === layerId)
-    if (!layer) return
-
-    try {
-      const response = await fetch(`${API_BASE}/process/mask-operation`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          session_id: sessionId,
-          mask1_base64: layer.maskBase64,
-          mask2_base64: newMaskBase64,
-          operation: operation,
-          kernel_size: 3
-        })
-      })
-
-      const data = await response.json()
-
-      if (data.success) {
-        // 更新图层掩码
-        const updatedLayers = layers.map(l =>
-          l.id === layerId
-            ? { ...l, maskBase64: data.mask, pixelCount: data.pixel_count }
-            : l
-        )
-        setLayers(updatedLayers)
-        updateCompositePreview(updatedLayers, selectedLayerId)
-      }
-    } catch (error) {
-      console.error('合并掩码失败:', error)
+  // ========== 曲线选择 ==========
+  const handleCurveSelect = (curveId) => {
+    setSelectedCurveId(curveId)
+    const curve = curves.find(c => c.id === curveId)
+    if (curve && onLayerSelect) {
+      onLayerSelect(curve)
     }
+    updateOverlay(curves, curveId)
   }
 
-  // ========== 画笔/橡皮绘制 ==========
+  // ========== 曲线可见性切换 ==========
+  const handleCurveVisibilityToggle = (curveId) => {
+    const updatedCurves = curves.map(c =>
+      c.id === curveId ? { ...c, visible: !c.visible } : c
+    )
+    setCurves(updatedCurves)
+    updateOverlay(updatedCurves, selectedCurveId)
+  }
+
+  // ========== 绘制功能 ==========
   const handleMouseDown = (e) => {
     if (tool === 'select') return
 
     const stage = e.target.getStage()
     const pos = stage.getPointerPosition()
 
-    if (tool === 'magic_wand') {
-      handleMagicWandClick(pos.x, pos.y)
-      return
-    }
-
-    if (tool === 'brush' || tool === 'eraser') {
-      if (!selectedLayerId) {
-        setMessage('请先选择一个图层')
+    if (tool === 'draw' || tool === 'erase') {
+      if (!selectedCurveId) {
+        setMessage('请先选择一条曲线')
         return
       }
       setIsDrawing(true)
       lastPointRef.current = pos
+
+      // 转换为图像坐标
+      const imageX = Math.round((pos.x - stagePos.x) / scale * (imageSize.width / stageSize.width))
+      const imageY = Math.round((pos.y - stagePos.y) / scale * (imageSize.height / stageSize.height))
+      setDrawingPoints([[imageX, imageY]])
     }
   }
 
   const handleMouseMove = (e) => {
-    if (!isDrawing || (tool !== 'brush' && tool !== 'eraser')) return
+    if (!isDrawing || (tool !== 'draw' && tool !== 'erase')) return
 
     const stage = e.target.getStage()
     const pos = stage.getPointerPosition()
-    const layer = drawingLayerRef.current
 
-    if (layer && lastPointRef.current) {
-      const context = layer.getContext()
-      context.globalCompositeOperation = tool === 'eraser' ? 'destination-out' : 'source-over'
-      context.strokeStyle = tool === 'brush' ? 'white' : 'black'
-      context.lineWidth = brushSize
-      context.lineCap = 'round'
-      context.lineJoin = 'round'
+    // 转换为图像坐标
+    const imageX = Math.round((pos.x - stagePos.x) / scale * (imageSize.width / stageSize.width))
+    const imageY = Math.round((pos.y - stagePos.y) / scale * (imageSize.height / stageSize.height))
 
-      context.beginPath()
-      context.moveTo(lastPointRef.current.x, lastPointRef.current.y)
-      context.lineTo(pos.x, pos.y)
-      context.stroke()
-
-      lastPointRef.current = pos
-      layer.batchDraw()
-    }
+    setDrawingPoints(prev => [...prev, [imageX, imageY]])
+    lastPointRef.current = pos
   }
 
   const handleMouseUp = async () => {
     if (!isDrawing) return
     setIsDrawing(false)
 
-    // 将绘制内容保存到图层
-    if (drawingLayerRef.current && selectedLayerId) {
-      await saveDrawingToLayer()
+    // 保存绘制的点到曲线
+    if (drawingPoints.length > 1 && selectedCurveId) {
+      await saveDrawingToCurve()
     }
+    setDrawingPoints([])
   }
 
-  const saveDrawingToLayer = async () => {
-    // 这里需要将 Canvas 绘制转换为掩码并上传
-    // 简化实现：直接更新预览
-    updateCompositePreview(layers, selectedLayerId)
-  }
+  const saveDrawingToCurve = async () => {
+    const curve = curves.find(c => c.id === selectedCurveId)
+    if (!curve) return
 
-  // ========== 更新合成预览 ==========
-  const updateCompositePreview = async (layerList, selectedId) => {
-    if (!sessionId || layerList.length === 0) return
+    setIsLoading(true)
+    setMessage('正在更新曲线...')
 
     try {
-      const response = await fetch(`${API_BASE}/process/composite-preview`, {
+      // 合并绘制的点到曲线
+      let newPoints
+      if (tool === 'draw') {
+        // 添加模式：合并新点
+        newPoints = [...curve.skeleton_points, ...drawingPoints]
+        // 按 X 排序
+        newPoints.sort((a, b) => a[0] - b[0])
+      } else {
+        // 擦除模式：移除附近的点
+        newPoints = curve.skeleton_points.filter(pt => {
+          return !drawingPoints.some(dp =>
+            Math.abs(pt[0] - dp[0]) < brushSize * 2 &&
+            Math.abs(pt[1] - dp[1]) < brushSize * 2
+          )
+        })
+      }
+
+      // 调用后端更新曲线
+      const response = await fetch(`${API_BASE}/process/update-curve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           session_id: sessionId,
-          layers: layerList.map(l => ({
-            name: l.name,
-            mask: l.maskBase64,
-            color_rgb: l.colorRgb,
-            opacity: l.opacity,
-            visible: l.visible
-          })),
-          selected_layer: layerList.find(l => l.id === selectedId)?.name
+          curve_id: selectedCurveId,
+          edited_points: newPoints,
+          original_mask_base64: curve.mask_base64
         })
       })
 
       const data = await response.json()
 
       if (data.success) {
-        setCompositePreview(data.preview)
+        // 更新曲线数据
+        const updatedCurves = curves.map(c =>
+          c.id === selectedCurveId
+            ? { ...c, skeleton_points: data.curve.skeleton_points, mask_base64: data.curve.mask_base64 }
+            : c
+        )
+        setCurves(updatedCurves)
+        updateOverlay(updatedCurves, selectedCurveId)
+        setMessage('曲线更新成功')
+      } else {
+        setMessage(`更新失败: ${data.message}`)
       }
     } catch (error) {
-      console.error('更新预览失败:', error)
+      setMessage(`更新错误: ${error.message}`)
+    } finally {
+      setIsLoading(false)
     }
   }
 
-  // ========== 图层操作 ==========
-  const handleLayerVisibilityToggle = (layerId) => {
-    const updatedLayers = layers.map(l =>
-      l.id === layerId ? { ...l, visible: !l.visible } : l
-    )
-    setLayers(updatedLayers)
-    updateCompositePreview(updatedLayers, selectedLayerId)
-  }
-
-  const handleLayerOpacityChange = (layerId, opacity) => {
-    const updatedLayers = layers.map(l =>
-      l.id === layerId ? { ...l, opacity: parseFloat(opacity) } : l
-    )
-    setLayers(updatedLayers)
-    updateCompositePreview(updatedLayers, selectedLayerId)
-  }
-
-  const handleLayerDelete = (layerId) => {
-    const updatedLayers = layers.filter(l => l.id !== layerId)
-    setLayers(updatedLayers)
-    if (selectedLayerId === layerId) {
-      setSelectedLayerId(updatedLayers[0]?.id || null)
-    }
-    updateCompositePreview(updatedLayers, selectedLayerId)
-  }
-
-  const handleLayerSelect = (layerId) => {
-    setSelectedLayerId(layerId)
-    const layer = layers.find(l => l.id === layerId)
-    if (layer && onLayerSelect) {
-      onLayerSelect(layer)
-    }
-  }
-
-  // ========== 从图层提取数据 ==========
-  const handleExtractFromSelectedLayer = async () => {
-    if (!selectedLayerId || !calibrationPoints) {
-      setMessage('请先选择图层并完成校准')
+  // ========== 从曲线提取数据 ==========
+  const handleExtractFromCurve = async () => {
+    if (!selectedCurveId || !calibrationPoints) {
+      setMessage('请先选择曲线并完成校准')
       return
     }
 
-    const layer = layers.find(l => l.id === selectedLayerId)
-    if (!layer) return
+    const curve = curves.find(c => c.id === selectedCurveId)
+    if (!curve || !curve.skeleton_points || curve.skeleton_points.length === 0) {
+      setMessage('所选曲线没有有效的轮廓点')
+      return
+    }
 
     setIsLoading(true)
-    setMessage('正在从图层提取数据...')
+    setMessage('正在从曲线提取数据...')
 
     try {
-      const response = await fetch(`${API_BASE}/extract/mask`, {
+      const response = await fetch(`${API_BASE}/extract/curve-points`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           session_id: sessionId,
-          mask_base64: layer.maskBase64,
+          skeleton_points: curve.skeleton_points,
           calibration: {
             x_start: {
               pixel_x: calibrationPoints.xStart.pixel.x,
@@ -365,7 +303,7 @@ const LayerEditor = ({
               real_value: calibrationPoints.yEnd.value
             }
           },
-          direction: 'auto'
+          downsample_factor: 1
         })
       })
 
@@ -374,7 +312,7 @@ const LayerEditor = ({
       if (data.success) {
         setMessage(`成功提取 ${data.count} 个数据点`)
         if (onExtractFromLayer) {
-          onExtractFromLayer(data.data, layer)
+          onExtractFromLayer(data.data, curve)
         }
       } else {
         setMessage(`提取失败: ${data.message}`)
@@ -409,214 +347,254 @@ const LayerEditor = ({
     })
   }
 
+  // ========== 渲染曲线轮廓线 ==========
+  const renderCurveLines = () => {
+    return curves.map(curve => {
+      if (!curve.visible || !curve.skeleton_points || curve.skeleton_points.length < 2) {
+        return null
+      }
+
+      const isSelected = curve.id === selectedCurveId
+      const color = `rgb(${curve.highlight_color?.join(',') || curve.color_rgb?.join(',') || '255,0,0'})`
+
+      // 转换坐标到画布坐标
+      const points = curve.skeleton_points.flatMap(pt => [
+        pt[0] * (stageSize.width / imageSize.width),
+        pt[1] * (stageSize.height / imageSize.height)
+      ])
+
+      return (
+        <Line
+          key={curve.id}
+          points={points}
+          stroke={color}
+          strokeWidth={isSelected ? 3 : 2}
+          opacity={isSelected ? 1 : 0.7}
+          lineCap="round"
+          lineJoin="round"
+          shadowColor={isSelected ? 'white' : undefined}
+          shadowBlur={isSelected ? 5 : 0}
+        />
+      )
+    })
+  }
+
+  // ========== 渲染当前绘制的线 ==========
+  const renderDrawingLine = () => {
+    if (drawingPoints.length < 2) return null
+
+    const points = drawingPoints.flatMap(pt => [
+      pt[0] * (stageSize.width / imageSize.width),
+      pt[1] * (stageSize.height / imageSize.height)
+    ])
+
+    return (
+      <Line
+        points={points}
+        stroke={tool === 'draw' ? '#00ff00' : '#ff0000'}
+        strokeWidth={brushSize}
+        lineCap="round"
+        lineJoin="round"
+        opacity={0.8}
+      />
+    )
+  }
+
   // ========== 渲染 ==========
   return (
-    <div className="layer-editor flex gap-4">
-      {/* 左侧：工具栏和图层列表 */}
-      <div className="sidebar w-64 bg-white rounded-lg shadow-lg p-4 space-y-4">
-        {/* 自动分层按钮 */}
+    <div className="layer-editor">
+      {/* 顶部工具栏 */}
+      <div className="flex flex-wrap gap-2 mb-4">
+        {/* 自动检测按钮 */}
         <button
-          onClick={handleAutoDetectLayers}
+          onClick={handleDetectCurves}
           disabled={isLoading}
-          className="w-full px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400 transition"
+          className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400 transition flex items-center gap-2"
         >
-          🎨 自动分层
+          <span>🔍</span>
+          <span>自动检测曲线</span>
         </button>
 
-        {/* 工具箱 */}
-        <div className="tools space-y-2">
-          <h3 className="font-semibold text-gray-700">工具箱</h3>
-          <div className="grid grid-cols-2 gap-2">
-            <button
-              onClick={() => setTool('select')}
-              className={`px-3 py-2 rounded ${tool === 'select' ? 'bg-blue-500 text-white' : 'bg-gray-200'}`}
-            >
-              ↖️ 选择
-            </button>
-            <button
-              onClick={() => setTool('brush')}
-              className={`px-3 py-2 rounded ${tool === 'brush' ? 'bg-blue-500 text-white' : 'bg-gray-200'}`}
-            >
-              🖌️ 画笔
-            </button>
-            <button
-              onClick={() => setTool('eraser')}
-              className={`px-3 py-2 rounded ${tool === 'eraser' ? 'bg-blue-500 text-white' : 'bg-gray-200'}`}
-            >
-              🧼 橡皮
-            </button>
-            <button
-              onClick={() => setTool('magic_wand')}
-              className={`px-3 py-2 rounded ${tool === 'magic_wand' ? 'bg-blue-500 text-white' : 'bg-gray-200'}`}
-            >
-              🪄 魔棒
-            </button>
-          </div>
-
-          {/* 画笔大小 */}
-          {(tool === 'brush' || tool === 'eraser') && (
-            <div className="mt-2">
-              <label className="text-sm text-gray-600">画笔大小: {brushSize}px</label>
-              <input
-                type="range"
-                min="1"
-                max="50"
-                value={brushSize}
-                onChange={(e) => setBrushSize(parseInt(e.target.value))}
-                className="w-full"
-              />
-            </div>
-          )}
+        {/* 工具选择 */}
+        <div className="flex gap-1 border-l pl-2 ml-2">
+          <button
+            onClick={() => setTool('select')}
+            className={`px-3 py-2 rounded ${tool === 'select' ? 'bg-blue-500 text-white' : 'bg-gray-200 hover:bg-gray-300'}`}
+            title="选择工具"
+          >
+            ↖️
+          </button>
+          <button
+            onClick={() => setTool('draw')}
+            className={`px-3 py-2 rounded ${tool === 'draw' ? 'bg-green-500 text-white' : 'bg-gray-200 hover:bg-gray-300'}`}
+            title="绘制工具 - 补充轮廓"
+          >
+            ✏️
+          </button>
+          <button
+            onClick={() => setTool('erase')}
+            className={`px-3 py-2 rounded ${tool === 'erase' ? 'bg-red-500 text-white' : 'bg-gray-200 hover:bg-gray-300'}`}
+            title="擦除工具 - 删除轮廓"
+          >
+            🧹
+          </button>
         </div>
 
-        {/* 图层列表 */}
-        <div className="layers space-y-2">
-          <h3 className="font-semibold text-gray-700">图层列表</h3>
-          <div className="space-y-1 max-h-96 overflow-y-auto">
-            {layers.map((layer) => (
-              <div
-                key={layer.id}
-                className={`layer-item p-2 rounded border ${
-                  selectedLayerId === layer.id ? 'border-blue-500 bg-blue-50' : 'border-gray-200'
-                }`}
-                onClick={() => handleLayerSelect(layer.id)}
-              >
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2 flex-1">
-                    {/* 可见性切换 */}
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        handleLayerVisibilityToggle(layer.id)
-                      }}
-                      className="text-lg"
-                    >
-                      {layer.visible ? '👁️' : '🚫'}
-                    </button>
-
-                    {/* 颜色预览 */}
-                    <div
-                      className="w-4 h-4 rounded border border-gray-300"
-                      style={{ backgroundColor: `rgb(${layer.colorRgb.join(',')})` }}
-                    />
-
-                    {/* 图层名称 */}
-                    <span className="text-sm font-medium truncate">{layer.name}</span>
-                  </div>
-
-                  {/* 删除按钮 */}
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      handleLayerDelete(layer.id)
-                    }}
-                    className="text-red-500 hover:text-red-700"
-                  >
-                    🗑️
-                  </button>
-                </div>
-
-                {/* 不透明度滑块 */}
-                <div className="mt-1">
-                  <input
-                    type="range"
-                    min="0"
-                    max="1"
-                    step="0.1"
-                    value={layer.opacity}
-                    onChange={(e) => {
-                      e.stopPropagation()
-                      handleLayerOpacityChange(layer.id, e.target.value)
-                    }}
-                    className="w-full"
-                  />
-                  <div className="text-xs text-gray-500">
-                    不透明度: {Math.round(layer.opacity * 100)}%
-                  </div>
-                </div>
-
-                {/* 像素统计 */}
-                <div className="text-xs text-gray-500 mt-1">
-                  {layer.pixelCount} 像素 ({layer.percentage}%)
-                </div>
-              </div>
-            ))}
+        {/* 画笔大小 */}
+        {(tool === 'draw' || tool === 'erase') && (
+          <div className="flex items-center gap-2 border-l pl-2 ml-2">
+            <span className="text-sm text-gray-600">大小:</span>
+            <input
+              type="range"
+              min="1"
+              max="20"
+              value={brushSize}
+              onChange={(e) => setBrushSize(parseInt(e.target.value))}
+              className="w-20"
+            />
+            <span className="text-sm text-gray-600">{brushSize}px</span>
           </div>
-        </div>
+        )}
 
         {/* 提取数据按钮 */}
-        {selectedLayerId && calibrationPoints && (
+        {selectedCurveId && calibrationPoints && (
           <button
-            onClick={handleExtractFromSelectedLayer}
+            onClick={handleExtractFromCurve}
             disabled={isLoading}
-            className="w-full px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-400 transition"
+            className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-400 transition flex items-center gap-2 ml-auto"
           >
-            📊 提取当前图层数据
+            <span>📊</span>
+            <span>提取数据</span>
           </button>
         )}
       </div>
 
-      {/* 右侧：画布区域 */}
-      <div className="canvas-area flex-1 bg-white rounded-lg shadow-lg p-4">
-        <div className="mb-2 text-sm text-gray-600">
-          {message || '使用工具编辑图层，或点击"自动分层"开始'}
+      {/* 曲线颜色按钮 */}
+      {curves.length > 0 && (
+        <div className="flex flex-wrap gap-2 mb-4 p-3 bg-gray-100 rounded-lg">
+          <span className="text-sm text-gray-600 self-center mr-2">曲线:</span>
+          {curves.map(curve => (
+            <button
+              key={curve.id}
+              onClick={() => handleCurveSelect(curve.id)}
+              className={`flex items-center gap-2 px-3 py-2 rounded-lg border-2 transition ${
+                selectedCurveId === curve.id
+                  ? 'border-blue-500 bg-blue-50'
+                  : 'border-gray-300 bg-white hover:border-gray-400'
+              }`}
+            >
+              {/* 颜色指示器 */}
+              <div
+                className="w-4 h-4 rounded-full border border-gray-400"
+                style={{
+                  backgroundColor: `rgb(${curve.color_rgb?.join(',') || '128,128,128'})`
+                }}
+              />
+              {/* 曲线名称 */}
+              <span className="text-sm font-medium">{curve.name}</span>
+              {/* 可见性切换 */}
+              <button
+                onClick={(e) => {
+                  e.stopPropagation()
+                  handleCurveVisibilityToggle(curve.id)
+                }}
+                className="ml-1 text-lg"
+                title={curve.visible ? '隐藏' : '显示'}
+              >
+                {curve.visible ? '👁️' : '🚫'}
+              </button>
+            </button>
+          ))}
         </div>
+      )}
 
-        <div className="border border-gray-300 rounded overflow-hidden" style={{ width: stageSize.width, height: stageSize.height }}>
-          <Stage
-            ref={stageRef}
-            width={stageSize.width}
-            height={stageSize.height}
-            scaleX={scale}
-            scaleY={scale}
-            x={stagePos.x}
-            y={stagePos.y}
-            onWheel={handleWheel}
-            onMouseDown={handleMouseDown}
-            onMouseMove={handleMouseMove}
-            onMouseUp={handleMouseUp}
-            onMouseLeave={handleMouseUp}
-          >
-            <Layer>
-              {/* 原始图像 */}
-              {image && (
-                <KonvaImage
-                  image={image}
-                  width={stageSize.width}
-                  height={stageSize.height}
-                />
-              )}
-
-              {/* 合成预览 */}
-              {compositePreview && (
-                <KonvaImage
-                  image={compositePreview}
-                  width={stageSize.width}
-                  height={stageSize.height}
-                  opacity={0.7}
-                />
-              )}
-            </Layer>
-
-            {/* 绘制层 */}
-            <Layer ref={drawingLayerRef} />
-          </Stage>
+      {/* 状态消息 */}
+      {message && (
+        <div className={`mb-3 p-2 rounded text-sm ${
+          message.includes('失败') || message.includes('错误')
+            ? 'bg-red-100 text-red-700'
+            : 'bg-green-100 text-green-700'
+        }`}>
+          {message}
         </div>
+      )}
 
-        {/* 缩放控制 */}
-        <div className="mt-2 flex items-center gap-2">
+      {/* 画布区域 */}
+      <div
+        className="border border-gray-300 rounded-lg overflow-hidden bg-gray-50"
+        style={{ width: stageSize.width, height: stageSize.height }}
+      >
+        <Stage
+          ref={stageRef}
+          width={stageSize.width}
+          height={stageSize.height}
+          scaleX={scale}
+          scaleY={scale}
+          x={stagePos.x}
+          y={stagePos.y}
+          onWheel={handleWheel}
+          onMouseDown={handleMouseDown}
+          onMouseMove={handleMouseMove}
+          onMouseUp={handleMouseUp}
+          onMouseLeave={handleMouseUp}
+          style={{ cursor: tool === 'select' ? 'default' : 'crosshair' }}
+        >
+          <Layer>
+            {/* 原始图像 */}
+            {image && (
+              <KonvaImage
+                image={image}
+                width={stageSize.width}
+                height={stageSize.height}
+              />
+            )}
+          </Layer>
+
+          {/* 曲线轮廓层 */}
+          <Layer>
+            {imageSize.width > 0 && renderCurveLines()}
+            {renderDrawingLine()}
+          </Layer>
+        </Stage>
+      </div>
+
+      {/* 底部控制 */}
+      <div className="mt-3 flex items-center justify-between">
+        <div className="flex items-center gap-2">
           <button
             onClick={() => {
               setScale(1)
               setStagePos({ x: 0, y: 0 })
             }}
-            className="px-3 py-1 bg-gray-200 rounded hover:bg-gray-300"
+            className="px-3 py-1 bg-gray-200 rounded hover:bg-gray-300 text-sm"
           >
-            重置缩放
+            重置视图
           </button>
           <span className="text-sm text-gray-600">缩放: {Math.round(scale * 100)}%</span>
         </div>
+
+        {selectedCurveId && (
+          <div className="text-sm text-gray-600">
+            已选择: <span className="font-medium">{curves.find(c => c.id === selectedCurveId)?.name}</span>
+            {' | '}
+            轮廓点数: <span className="font-medium">{curves.find(c => c.id === selectedCurveId)?.skeleton_points?.length || 0}</span>
+          </div>
+        )}
       </div>
+
+      {/* 使用说明 */}
+      {curves.length === 0 && (
+        <div className="mt-4 p-4 bg-blue-50 rounded-lg text-sm text-blue-800">
+          <h4 className="font-semibold mb-2">使用说明:</h4>
+          <ol className="list-decimal list-inside space-y-1">
+            <li>点击 <strong>"自动检测曲线"</strong> 识别图中所有颜色曲线</li>
+            <li>点击 <strong>颜色按钮</strong> 切换显示不同曲线的轮廓</li>
+            <li>使用 <strong>✏️ 绘制工具</strong> 补充断裂的轮廓线</li>
+            <li>使用 <strong>🧹 擦除工具</strong> 删除错误的轮廓部分</li>
+            <li>编辑完成后点击 <strong>"提取数据"</strong> 获取曲线数据</li>
+          </ol>
+        </div>
+      )}
     </div>
   )
 }

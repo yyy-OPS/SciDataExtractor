@@ -923,6 +923,386 @@ class ImageProcessor:
         base64_str = base64.b64encode(buffer).decode('utf-8')
         return f"data:image/png;base64,{base64_str}"
 
+    # ==================== 轮廓提取和高亮显示 ====================
+
+    def detect_curves_with_contours(
+        self,
+        k: int = 5,
+        min_saturation: int = 30,
+        min_contour_length: int = 50
+    ) -> Dict:
+        """
+        检测图像中的曲线并提取轮廓线
+
+        核心算法：
+        1. K-Means 颜色聚类识别主要颜色
+        2. 对每个颜色进行边缘检测和骨架化
+        3. 提取轮廓线坐标（用于前端绘制）
+        4. 生成带轮廓高亮的预览图
+
+        参数:
+            k: 聚类数量
+            min_saturation: 最小饱和度阈值
+            min_contour_length: 最小轮廓长度（过滤噪点）
+
+        返回:
+            {
+                "curves": [
+                    {
+                        "id": str,
+                        "name": str,
+                        "color_rgb": [r, g, b],
+                        "color_hsv": [h, s, v],
+                        "contour_points": [[x1,y1], [x2,y2], ...],  # 轮廓点坐标
+                        "skeleton_points": [[x1,y1], [x2,y2], ...], # 骨架点坐标
+                        "mask_base64": str,
+                        "pixel_count": int
+                    },
+                    ...
+                ],
+                "preview_image": str (base64),
+                "original_with_overlay": str (base64)
+            }
+        """
+        # 获取图像像素
+        pixels = self.image_hsv.reshape(-1, 3).astype(np.float32)
+
+        # 过滤背景像素
+        saturation = pixels[:, 1]
+        value = pixels[:, 2]
+        valid_mask = (saturation >= min_saturation) & (value > 30) & (value < 250)
+        valid_pixels = pixels[valid_mask]
+
+        if len(valid_pixels) < 100:
+            valid_pixels = pixels
+            valid_mask = np.ones(len(pixels), dtype=bool)
+
+        # K-Means 聚类
+        if SKLEARN_AVAILABLE:
+            kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+            kmeans.fit(valid_pixels)
+            centers = kmeans.cluster_centers_
+            labels = kmeans.labels_
+        else:
+            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.2)
+            _, labels, centers = cv2.kmeans(
+                valid_pixels, k, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS
+            )
+            labels = labels.flatten()
+
+        # 创建完整标签数组
+        full_labels = np.full(len(pixels), -1, dtype=np.int32)
+        full_labels[valid_mask] = labels
+
+        # 预定义颜色
+        highlight_colors = [
+            (255, 0, 0),    # 红
+            (0, 0, 255),    # 蓝
+            (0, 255, 0),    # 绿
+            (255, 165, 0),  # 橙
+            (128, 0, 128),  # 紫
+            (255, 255, 0),  # 黄
+            (0, 255, 255),  # 青
+            (255, 0, 255),  # 品红
+        ]
+
+        curves = []
+        color_names = self._get_color_names()
+
+        # 创建预览图像
+        preview_image = self.image_rgb.copy()
+        overlay_image = self.image_rgb.copy()
+
+        for i in range(k):
+            center_hsv = centers[i].astype(np.uint8)
+
+            # 创建该颜色的掩码
+            cluster_mask = (full_labels == i).reshape(self.height, self.width)
+            mask_uint8 = (cluster_mask * 255).astype(np.uint8)
+
+            # 形态学清理
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            mask_uint8 = cv2.morphologyEx(mask_uint8, cv2.MORPH_OPEN, kernel)
+            mask_uint8 = cv2.morphologyEx(mask_uint8, cv2.MORPH_CLOSE, kernel)
+
+            pixel_count = int(np.sum(mask_uint8 > 0))
+            if pixel_count < 50:
+                continue
+
+            # 提取轮廓
+            contours, _ = cv2.findContours(
+                mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+
+            # 过滤小轮廓并合并点
+            contour_points = []
+            for contour in contours:
+                if cv2.arcLength(contour, False) >= min_contour_length:
+                    # 简化轮廓
+                    epsilon = 0.002 * cv2.arcLength(contour, True)
+                    approx = cv2.approxPolyDP(contour, epsilon, False)
+                    for point in approx:
+                        contour_points.append([int(point[0][0]), int(point[0][1])])
+
+            # 骨架化提取中心线
+            skeleton = skeletonize(mask_uint8 > 0)
+            skeleton_uint8 = (skeleton * 255).astype(np.uint8)
+            y_coords, x_coords = np.where(skeleton_uint8 > 0)
+
+            # 对骨架点进行排序（从左到右）
+            if len(x_coords) > 0:
+                sorted_indices = np.argsort(x_coords)
+                skeleton_points = [
+                    [int(x_coords[idx]), int(y_coords[idx])]
+                    for idx in sorted_indices[::max(1, len(sorted_indices) // 500)]  # 降采样
+                ]
+            else:
+                skeleton_points = []
+
+            # HSV 转 RGB
+            hsv_pixel = np.array([[[center_hsv[0], center_hsv[1], center_hsv[2]]]], dtype=np.uint8)
+            rgb_pixel = cv2.cvtColor(hsv_pixel, cv2.COLOR_HSV2RGB)[0, 0]
+
+            # 获取颜色名称
+            color_name = self._hsv_to_color_name(center_hsv, color_names)
+
+            # 选择高亮颜色
+            highlight_color = highlight_colors[i % len(highlight_colors)]
+
+            # 在预览图上绘制轮廓
+            cv2.drawContours(preview_image, contours, -1, highlight_color, 2)
+
+            # 在叠加图上绘制骨架线
+            for j in range(len(skeleton_points) - 1):
+                pt1 = tuple(skeleton_points[j])
+                pt2 = tuple(skeleton_points[j + 1])
+                cv2.line(overlay_image, pt1, pt2, highlight_color, 2)
+
+            # 编码掩码
+            _, buffer = cv2.imencode('.png', mask_uint8)
+            mask_base64 = base64.b64encode(buffer).decode('utf-8')
+
+            curves.append({
+                "id": f"curve_{i}",
+                "name": f"{color_name}_{i+1}",
+                "color_rgb": rgb_pixel.tolist(),
+                "color_hsv": center_hsv.tolist(),
+                "highlight_color": list(highlight_color),
+                "contour_points": contour_points,
+                "skeleton_points": skeleton_points,
+                "mask_base64": f"data:image/png;base64,{mask_base64}",
+                "pixel_count": pixel_count,
+                "visible": True,
+                "editable": True
+            })
+
+        # 按像素数量排序
+        curves.sort(key=lambda x: x["pixel_count"], reverse=True)
+
+        # 编码预览图像
+        _, preview_buffer = cv2.imencode('.png', cv2.cvtColor(preview_image, cv2.COLOR_RGB2BGR))
+        preview_base64 = base64.b64encode(preview_buffer).decode('utf-8')
+
+        _, overlay_buffer = cv2.imencode('.png', cv2.cvtColor(overlay_image, cv2.COLOR_RGB2BGR))
+        overlay_base64 = base64.b64encode(overlay_buffer).decode('utf-8')
+
+        return {
+            "curves": curves,
+            "preview_image": f"data:image/png;base64,{preview_base64}",
+            "original_with_overlay": f"data:image/png;base64,{overlay_base64}",
+            "count": len(curves)
+        }
+
+    def generate_curve_overlay(
+        self,
+        curves: List[Dict],
+        selected_curve_id: Optional[str] = None,
+        show_skeleton: bool = True,
+        show_contour: bool = False,
+        line_width: int = 2
+    ) -> str:
+        """
+        生成带有曲线轮廓高亮的叠加图像
+
+        参数:
+            curves: 曲线列表（包含 skeleton_points 或 contour_points）
+            selected_curve_id: 当前选中的曲线 ID（高亮显示）
+            show_skeleton: 是否显示骨架线
+            show_contour: 是否显示轮廓
+            line_width: 线宽
+
+        返回:
+            Base64 编码的 PNG 图像
+        """
+        result = self.image_rgb.copy()
+
+        for curve in curves:
+            if not curve.get("visible", True):
+                continue
+
+            color = tuple(curve.get("highlight_color", curve.get("color_rgb", [255, 0, 0])))
+            is_selected = curve.get("id") == selected_curve_id
+
+            # 选中的曲线使用更粗的线
+            width = line_width + 2 if is_selected else line_width
+            alpha = 1.0 if is_selected else 0.7
+
+            if show_skeleton and "skeleton_points" in curve:
+                points = curve["skeleton_points"]
+                if len(points) > 1:
+                    # 绘制骨架线
+                    for j in range(len(points) - 1):
+                        pt1 = tuple(points[j])
+                        pt2 = tuple(points[j + 1])
+                        cv2.line(result, pt1, pt2, color, width)
+
+            if show_contour and "contour_points" in curve:
+                points = curve["contour_points"]
+                if len(points) > 1:
+                    pts = np.array(points, dtype=np.int32).reshape((-1, 1, 2))
+                    cv2.polylines(result, [pts], False, color, width)
+
+            # 如果是选中的曲线，添加发光效果
+            if is_selected and "skeleton_points" in curve:
+                points = curve["skeleton_points"]
+                if len(points) > 1:
+                    # 绘制外发光
+                    for j in range(len(points) - 1):
+                        pt1 = tuple(points[j])
+                        pt2 = tuple(points[j + 1])
+                        cv2.line(result, pt1, pt2, (255, 255, 255), width + 4)
+                    # 再绘制主线
+                    for j in range(len(points) - 1):
+                        pt1 = tuple(points[j])
+                        pt2 = tuple(points[j + 1])
+                        cv2.line(result, pt1, pt2, color, width)
+
+        # 编码为 Base64
+        _, buffer = cv2.imencode('.png', cv2.cvtColor(result, cv2.COLOR_RGB2BGR))
+        base64_str = base64.b64encode(buffer).decode('utf-8')
+        return f"data:image/png;base64,{base64_str}"
+
+    def update_curve_from_edited_points(
+        self,
+        curve_id: str,
+        edited_points: List[List[int]],
+        original_mask_base64: str
+    ) -> Dict:
+        """
+        根据用户编辑的点更新曲线掩码
+
+        参数:
+            curve_id: 曲线 ID
+            edited_points: 用户编辑后的点列表 [[x1,y1], [x2,y2], ...]
+            original_mask_base64: 原始掩码
+
+        返回:
+            更新后的曲线数据
+        """
+        # 解码原始掩码
+        original_mask = self.base64_to_mask(original_mask_base64)
+
+        # 创建新掩码
+        new_mask = np.zeros_like(original_mask)
+
+        # 将编辑的点绘制到掩码上
+        if len(edited_points) > 1:
+            pts = np.array(edited_points, dtype=np.int32)
+            # 绘制线条（带一定宽度）
+            cv2.polylines(new_mask, [pts], False, 255, 3)
+
+            # 膨胀以创建区域
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            new_mask = cv2.dilate(new_mask, kernel, iterations=1)
+
+        # 与原始掩码合并（保留用户编辑的部分）
+        combined_mask = cv2.bitwise_or(original_mask, new_mask)
+
+        # 重新提取骨架
+        skeleton = skeletonize(combined_mask > 0)
+        y_coords, x_coords = np.where(skeleton)
+
+        if len(x_coords) > 0:
+            sorted_indices = np.argsort(x_coords)
+            skeleton_points = [
+                [int(x_coords[idx]), int(y_coords[idx])]
+                for idx in sorted_indices[::max(1, len(sorted_indices) // 500)]
+            ]
+        else:
+            skeleton_points = edited_points
+
+        # 编码新掩码
+        _, buffer = cv2.imencode('.png', combined_mask)
+        mask_base64 = base64.b64encode(buffer).decode('utf-8')
+
+        return {
+            "id": curve_id,
+            "mask_base64": f"data:image/png;base64,{mask_base64}",
+            "skeleton_points": skeleton_points,
+            "pixel_count": int(np.sum(combined_mask > 0))
+        }
+
+    def extract_data_from_curve_points(
+        self,
+        skeleton_points: List[List[int]],
+        downsample_factor: int = 1
+    ) -> List[Tuple[float, float]]:
+        """
+        从曲线骨架点提取物理坐标数据
+
+        参数:
+            skeleton_points: 骨架点列表 [[x1,y1], [x2,y2], ...]
+            downsample_factor: 降采样因子
+
+        返回:
+            物理坐标点列表 [(x1, y1), (x2, y2), ...]
+        """
+        if not self.calibration_set:
+            raise ValueError("请先设置校准参数")
+
+        physical_points = []
+
+        for i, (px, py) in enumerate(skeleton_points):
+            if i % downsample_factor != 0:
+                continue
+
+            if self.is_in_plot_region(px, py):
+                phys_x, phys_y = self.pixel_to_physical(px, py)
+                physical_points.append((phys_x, phys_y))
+
+        # 按 X 排序
+        physical_points.sort(key=lambda p: p[0])
+
+        # 去除重复的 X 值（取平均 Y）
+        if len(physical_points) > 0:
+            physical_points = self._merge_duplicate_x(physical_points)
+
+        return physical_points
+
+    def _merge_duplicate_x(
+        self,
+        points: List[Tuple[float, float]],
+        tolerance: float = 1e-6
+    ) -> List[Tuple[float, float]]:
+        """合并相同 X 值的点（取 Y 平均值）"""
+        if len(points) == 0:
+            return points
+
+        merged = []
+        current_x = points[0][0]
+        y_values = [points[0][1]]
+
+        for x, y in points[1:]:
+            if abs(x - current_x) < tolerance:
+                y_values.append(y)
+            else:
+                merged.append((current_x, np.median(y_values)))
+                current_x = x
+                y_values = [y]
+
+        merged.append((current_x, np.median(y_values)))
+        return merged
+
 
 # ==================== 测试代码 ====================
 if __name__ == "__main__":

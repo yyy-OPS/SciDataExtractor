@@ -172,6 +172,40 @@ class CompositePreviewRequest(BaseModel):
     selected_layer: Optional[str] = None
 
 
+class DetectCurvesRequest(BaseModel):
+    """曲线检测请求模型"""
+    session_id: str
+    k: int = 5  # 聚类数量
+    min_saturation: int = 30
+    min_contour_length: int = 50
+
+
+class CurveOverlayRequest(BaseModel):
+    """曲线叠加预览请求模型"""
+    session_id: str
+    curves: List[dict]  # 曲线列表
+    selected_curve_id: Optional[str] = None
+    show_skeleton: bool = True
+    show_contour: bool = False
+    line_width: int = 2
+
+
+class UpdateCurveRequest(BaseModel):
+    """更新曲线请求模型"""
+    session_id: str
+    curve_id: str
+    edited_points: List[List[int]]  # [[x1,y1], [x2,y2], ...]
+    original_mask_base64: str
+
+
+class ExtractFromCurveRequest(BaseModel):
+    """从曲线提取数据请求模型"""
+    session_id: str
+    skeleton_points: List[List[int]]
+    calibration: CalibrationData
+    downsample_factor: int = 1
+
+
 # ==================== API Endpoints ====================
 
 @app.get("/")
@@ -720,6 +754,163 @@ async def sam_status():
             "device": None,
             "message": "SAM 模块未安装，请运行: pip install ultralytics torch"
         }
+
+
+# ==================== 曲线轮廓检测 API ====================
+
+@app.post("/process/detect-curves")
+async def detect_curves(request: DetectCurvesRequest):
+    """
+    检测图像中的曲线并提取轮廓线
+
+    自动识别图中所有颜色曲线，返回：
+    - 每条曲线的轮廓点坐标（用于前端绘制）
+    - 每条曲线的骨架点坐标（用于数据提取）
+    - 带轮廓高亮的预览图
+    """
+    if request.session_id not in processors:
+        raise HTTPException(status_code=404, detail="会话不存在，请先上传图片")
+
+    processor = processors[request.session_id]
+
+    try:
+        result = processor.detect_curves_with_contours(
+            k=request.k,
+            min_saturation=request.min_saturation,
+            min_contour_length=request.min_contour_length
+        )
+
+        return {
+            "success": True,
+            "curves": result["curves"],
+            "preview_image": result["preview_image"],
+            "original_with_overlay": result["original_with_overlay"],
+            "count": result["count"],
+            "message": f"成功检测到 {result['count']} 条曲线"
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"曲线检测失败: {str(e)}")
+
+
+@app.post("/process/curve-overlay")
+async def generate_curve_overlay(request: CurveOverlayRequest):
+    """
+    生成带有曲线轮廓高亮的叠加图像
+
+    根据用户选择的曲线和显示选项，生成预览图
+    """
+    if request.session_id not in processors:
+        raise HTTPException(status_code=404, detail="会话不存在，请先上传图片")
+
+    processor = processors[request.session_id]
+
+    try:
+        overlay_image = processor.generate_curve_overlay(
+            curves=request.curves,
+            selected_curve_id=request.selected_curve_id,
+            show_skeleton=request.show_skeleton,
+            show_contour=request.show_contour,
+            line_width=request.line_width
+        )
+
+        return {
+            "success": True,
+            "overlay_image": overlay_image,
+            "message": "叠加图像生成成功"
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"生成叠加图像失败: {str(e)}")
+
+
+@app.post("/process/update-curve")
+async def update_curve(request: UpdateCurveRequest):
+    """
+    根据用户编辑的点更新曲线
+
+    用户在前端编辑轮廓线后，更新曲线的掩码和骨架点
+    """
+    if request.session_id not in processors:
+        raise HTTPException(status_code=404, detail="会话不存在，请先上传图片")
+
+    processor = processors[request.session_id]
+
+    try:
+        updated_curve = processor.update_curve_from_edited_points(
+            curve_id=request.curve_id,
+            edited_points=request.edited_points,
+            original_mask_base64=request.original_mask_base64
+        )
+
+        return {
+            "success": True,
+            "curve": updated_curve,
+            "message": "曲线更新成功"
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"更新曲线失败: {str(e)}")
+
+
+@app.post("/extract/curve-points")
+async def extract_from_curve_points(request: ExtractFromCurveRequest):
+    """
+    从曲线骨架点提取物理坐标数据
+
+    根据用户编辑后的曲线骨架点，结合校准参数，提取物理坐标数据
+    """
+    if request.session_id not in processors:
+        raise HTTPException(status_code=404, detail="会话不存在，请先上传图片")
+
+    processor = processors[request.session_id]
+
+    try:
+        # 设置校准参数
+        processor.set_calibration(
+            x_axis_pixels=(
+                (request.calibration.x_start.pixel_x, request.calibration.x_start.pixel_y),
+                (request.calibration.x_end.pixel_x, request.calibration.x_end.pixel_y)
+            ),
+            x_axis_values=(
+                request.calibration.x_start.real_value,
+                request.calibration.x_end.real_value
+            ),
+            y_axis_pixels=(
+                (request.calibration.y_start.pixel_x, request.calibration.y_start.pixel_y),
+                (request.calibration.y_end.pixel_x, request.calibration.y_end.pixel_y)
+            ),
+            y_axis_values=(
+                request.calibration.y_start.real_value,
+                request.calibration.y_end.real_value
+            )
+        )
+
+        # 从骨架点提取数据
+        data_points = processor.extract_data_from_curve_points(
+            skeleton_points=request.skeleton_points,
+            downsample_factor=request.downsample_factor
+        )
+
+        if len(data_points) == 0:
+            return {
+                "success": False,
+                "data": [],
+                "count": 0,
+                "message": "未能从曲线中提取到数据点"
+            }
+
+        result = [{"x": float(x), "y": float(y)} for x, y in data_points]
+
+        return {
+            "success": True,
+            "data": result,
+            "count": len(result),
+            "message": f"成功提取 {len(result)} 个数据点"
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"数据提取失败: {str(e)}")
 
 
 # ==================== AI Endpoints ====================
