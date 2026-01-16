@@ -3,6 +3,7 @@ import ImageCanvas from './components/ImageCanvas'
 import ControlPanel from './components/ControlPanel'
 import AIConfigHeader from './components/AIConfigHeader'
 import DataPreview from './components/DataPreview'
+import LayerEditor from './components/LayerEditor'
 import './App.css'
 
 const API_BASE = 'http://localhost:8000'
@@ -54,6 +55,10 @@ function App() {
   // 手动绘制模式
   const [isManualDrawMode, setIsManualDrawMode] = useState(false)
   const [smoothness, setSmoothness] = useState(0.5) // 平滑度 0-1
+
+  // 图层编辑模式
+  const [useLayerEditor, setUseLayerEditor] = useState(false) // 是否使用图层编辑器
+  const [selectedLayer, setSelectedLayer] = useState(null) // 当前选中的图层
 
   // 保存历史记录
   const saveHistory = useCallback((newData, action = '') => {
@@ -589,6 +594,29 @@ function App() {
     setMessage(isManualDrawMode ? '已退出手动绘制模式' : '已进入手动绘制模式，单击添加单点，长按拖动绘制路径')
   }
 
+  // ========== 图层编辑相关函数 ==========
+
+  // 切换图层编辑模式
+  const handleToggleLayerEditor = () => {
+    setUseLayerEditor(!useLayerEditor)
+    setMessage(useLayerEditor ? '已切换到传统模式' : '已切换到图层编辑模式')
+  }
+
+  // 图层选择回调
+  const handleLayerSelect = (layer) => {
+    setSelectedLayer(layer)
+    setMessage(`已选择图层: ${layer.name}`)
+  }
+
+  // 从图层提取数据回调
+  const handleExtractFromLayer = (data, layer) => {
+    setExtractedData(data)
+    saveHistory(data, `从图层 "${layer.name}" 提取数据`)
+    setRepairedData([])
+    setMessage(`成功从图层 "${layer.name}" 提取 ${data.length} 个数据点`)
+    setShowPreview(true)
+  }
+
   // 处理区域选择（用于AI处理）
   const handleSelectRegion = (selectedPoints, bounds) => {
     setSelectedRegion({
@@ -804,9 +832,18 @@ function App() {
         <div className="container mx-auto px-4 flex justify-between items-center">
           <div>
             <h1 className="text-3xl font-bold">SciDataExtractor</h1>
-            <p className="text-blue-100 mt-1">科学图表数据提取工具</p>
+            <p className="text-blue-100 mt-1">科学图表数据提取工具 - 支持图层编辑</p>
           </div>
           <div className="flex items-center gap-4">
+            {/* 模式切换按钮 */}
+            {uploadedImage && (
+              <button
+                onClick={handleToggleLayerEditor}
+                className="px-4 py-2 bg-white text-blue-600 rounded-lg hover:bg-blue-50 transition font-medium"
+              >
+                {useLayerEditor ? '📐 传统模式' : '🎨 图层编辑模式'}
+              </button>
+            )}
             {/* AI 配置按钮 */}
             <AIConfigHeader
               aiAvailable={aiAvailable}
@@ -832,26 +869,41 @@ function App() {
 
         {/* 主布局 */}
         <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-          {/* 左侧：图像画布 */}
+          {/* 左侧：图像画布或图层编辑器 */}
           <div className="xl:col-span-2 bg-white rounded-lg shadow-lg p-6">
-            <h2 className="text-xl font-semibold mb-4">图像区域</h2>
-            <ImageCanvas
-              image={uploadedImage}
-              currentStep={currentStep}
-              calibrationPoints={calibrationPoints}
-              onCalibrationComplete={handleCalibrationComplete}
-              onColorSample={handleColorSample}
-              extractedData={extractedData}
-              aiSuggestedValues={null}
-              onDeletePoints={handleDeletePoints}
-              onAddManualPoints={handleAddManualPoints}
-              extractRegion={extractRegion}
-              onSetExtractRegion={setExtractRegion}
-              isManualDrawMode={isManualDrawMode}
-              smoothness={smoothness}
-              pointSpacing={pointSpacing}
-              pointDensity={pointDensity}
-            />
+            <h2 className="text-xl font-semibold mb-4">
+              {useLayerEditor ? '图层编辑器' : '图像区域'}
+            </h2>
+
+            {useLayerEditor ? (
+              /* 图层编辑模式 */
+              <LayerEditor
+                sessionId={sessionId}
+                imageUrl={uploadedImage}
+                calibrationPoints={calibrationPoints}
+                onLayerSelect={handleLayerSelect}
+                onExtractFromLayer={handleExtractFromLayer}
+              />
+            ) : (
+              /* 传统模式 */
+              <ImageCanvas
+                image={uploadedImage}
+                currentStep={currentStep}
+                calibrationPoints={calibrationPoints}
+                onCalibrationComplete={handleCalibrationComplete}
+                onColorSample={handleColorSample}
+                extractedData={extractedData}
+                aiSuggestedValues={null}
+                onDeletePoints={handleDeletePoints}
+                onAddManualPoints={handleAddManualPoints}
+                extractRegion={extractRegion}
+                onSetExtractRegion={setExtractRegion}
+                isManualDrawMode={isManualDrawMode}
+                smoothness={smoothness}
+                pointSpacing={pointSpacing}
+                pointDensity={pointDensity}
+              />
+            )}
           </div>
 
           {/* 右侧：控制面板 */}
