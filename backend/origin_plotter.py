@@ -29,8 +29,9 @@ import numpy as np
 ORIGIN_AVAILABLE = False
 try:
     import originpro as op
-    # 检查是否可以连接到Origin
-    if op and op.oext:
+    # 只要能成功导入originpro包，就认为可用
+    # op.oext检查只在实际连接Origin时才有效
+    if op is not None:
         ORIGIN_AVAILABLE = True
 except ImportError:
     op = None
@@ -832,19 +833,24 @@ def check_origin_status() -> Dict[str, Any]:
         return result
 
     try:
-        # 尝试连接
-        if op and op.oext:
+        # 检查oext属性 - 这个属性只在运行时可用
+        # hasattr检查不会抛出异常
+        can_connect_to_origin = hasattr(op, 'oext') and op.oext is not None
+
+        if can_connect_to_origin:
             result["can_connect"] = True
-            result["message"] = "Origin可用"
+            result["message"] = "Origin可用，可以绘图"
             # 尝试获取版本信息
             try:
                 result["version"] = getattr(op, '__version__', '1.1.12')
             except:
-                pass
+                result["version"] = "1.1.12"
         else:
-            result["message"] = "无法连接到Origin。请确保Origin已安装并运行"
+            result["message"] = "originpro包已安装，但无法连接到Origin。请确保Origin 2022已安装并可以启动"
+            result["available"] = True  # 包已安装，只是连接不上
     except Exception as e:
-        result["message"] = f"连接Origin时出错: {str(e)}"
+        result["message"] = f"检查Origin时出错: {str(e)}"
+        result["available"] = True  # 包已安装
 
     return result
 
