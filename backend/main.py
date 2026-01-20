@@ -6,6 +6,7 @@ FastAPI RESTful API with AI-assisted chart recognition
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import List, Optional
 import os
@@ -46,6 +47,9 @@ UPLOAD_DIR = Path("uploads")
 OUTPUT_DIR = Path("outputs")
 UPLOAD_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
+
+# Mount static files for outputs
+app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
 
 # Store image processor instances per session
 processors = {}
@@ -1044,6 +1048,376 @@ async def ai_smooth_data(request: AISmoothRequest):
         error_detail = traceback.format_exc()
         print(f"[AI Smooth] 错误详情:\n{error_detail}")
         raise HTTPException(status_code=500, detail=f"数据平滑失败: {str(e)}")
+
+
+# ==================== Origin 绘图 API Endpoints ====================
+
+class OriginPlotRequest(BaseModel):
+    """Origin绘图请求模型"""
+    # 数据
+    x_data: List[float]
+    y_data: Union[List[float], List[List[float]]]
+    x_name: str = "X"
+    y_names: Union[str, List[str]] = "Y"
+
+    # 图表配置
+    graph_type: str = "line"  # line, scatter, column, surface, contour, etc.
+    title: str = ""
+    width: int = 800
+    height: int = 600
+    export_format: str = "png"
+    export_dpi: int = 300
+
+    # 轴配置
+    x_title: str = ""
+    y_title: str = ""
+    x_min: Optional[float] = None
+    x_max: Optional[float] = None
+    y_min: Optional[float] = None
+    y_max: Optional[float] = None
+
+    # 样式配置
+    color: str = "#1f77b4"
+    show_grid: bool = True
+    show_legend: bool = True
+    background_color: int = 0
+
+    # 模板
+    template: str = ""
+
+
+class OriginXYZPlotRequest(BaseModel):
+    """Origin XYZ绘图请求模型"""
+    x_data: List[float]
+    y_data: List[float]
+    z_data: List[float]
+    title: str = ""
+    graph_type: str = "surface_colormap"
+    width: int = 800
+    height: int = 600
+    export_format: str = "png"
+    colormap: str = "Maple.pal"
+
+
+class OriginBatchPlotRequest(BaseModel):
+    """Origin批量绘图请求"""
+    datasets: List[dict]  # 每个包含 x_data, y_data
+    graph_type: str = "line"
+    template: str = "PAN2VERT"
+    export_format: str = "png"
+
+
+class OriginLabTalkRequest(BaseModel):
+    """LabTalk脚本执行请求"""
+    command: str
+
+
+@app.get("/origin/status")
+async def get_origin_status():
+    """
+    检查Origin连接状态
+    """
+    try:
+        from origin_plotter import check_origin_status
+        status = check_origin_status()
+        return status
+    except ImportError:
+        return {
+            "available": False,
+            "message": "originpro包未安装。请运行: pip install originpro",
+            "can_connect": False
+        }
+    except Exception as e:
+        return {
+            "available": False,
+            "message": f"检查Origin状态时出错: {str(e)}",
+            "can_connect": False
+        }
+
+
+@app.post("/origin/plot")
+async def origin_plot(request: OriginPlotRequest):
+    """
+    使用Origin绘制图表
+
+    支持: 折线图、散点图、柱状图、双轴图等
+    """
+    try:
+        from origin_plotter import OriginPlotter, GraphType, ExportFormat, AxisConfig, GraphConfig
+
+        # 处理y_names
+        if isinstance(request.y_data[0], list):
+            y_names = request.y_names if isinstance(request.y_names, list) else [f"Y{i+1}" for i in range(len(request.y_data))]
+        else:
+            y_names = request.y_names if isinstance(request.y_names, str) else "Y"
+
+        # 构建数据列
+        from origin_plotter import WorksheetData, DataColumn, PlotRequest
+
+        columns = [DataColumn(request.x_name, request.x_data, axis="X")]
+
+        if isinstance(request.y_data[0], list):
+            for i, y_series in enumerate(request.y_data):
+                name = y_names[i] if isinstance(y_names, list) and i < len(y_names) else f"Y{i+1}"
+                columns.append(DataColumn(name, y_series))
+        else:
+            columns.append(DataColumn(y_names if isinstance(y_names, str) else y_names[0], request.y_data))
+
+        data = WorksheetData(name="PlotData", columns=columns)
+
+        # 构建配置
+        graph_config = GraphConfig(
+            name=request.title or "OriginPlot",
+            title=request.title,
+            width=request.width,
+            height=request.height,
+            x_axis=AxisConfig(
+                title=request.x_title or request.x_name,
+                min_value=request.x_min,
+                max_value=request.x_max,
+                show_grid=request.show_grid
+            ),
+            y_axis=AxisConfig(
+                title=request.y_title or (y_names if isinstance(y_names, str) else ""),
+                min_value=request.y_min,
+                max_value=request.y_max,
+                show_grid=request.show_grid
+            ),
+            legend_show=request.show_legend,
+            background_color=request.background_color
+        )
+
+        # 获取图表类型
+        graph_type_map = {
+            "line": GraphType.LINE,
+            "scatter": GraphType.SCATTER,
+            "line_symbol": GraphType.LINE_SYMBOL,
+            "column": GraphType.COLUMN,
+            "bar": GraphType.BAR,
+            "area": GraphType.AREA,
+            "stacked_column": GraphType.STACKED_COLUMN,
+            "double_y": GraphType.DOUBLE_Y,
+            "double_x": GraphType.DOUBLE_X,
+        }
+        graph_type = graph_type_map.get(request.graph_type, GraphType.LINE)
+
+        # 获取导出格式
+        export_format_map = {
+            "png": ExportFormat.PNG,
+            "jpg": ExportFormat.JPG,
+            "pdf": ExportFormat.PDF,
+            "svg": ExportFormat.SVG,
+            "eps": ExportFormat.EPS,
+            "emf": ExportFormat.EMF,
+            "tiff": ExportFormat.TIFF,
+        }
+        export_format = export_format_map.get(request.export_format.lower(), ExportFormat.PNG)
+
+        plot_request = PlotRequest(
+            data=data,
+            graph_type=graph_type,
+            template=request.template,
+            config=graph_config,
+            export_format=export_format
+        )
+
+        # 执行绘图
+        with OriginPlotter(show_origin=False) as plotter:
+            result = plotter.plot(plot_request)
+
+        return result
+
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail=f"Origin绘图模块不可用: {str(e)}")
+    except Exception as e:
+        import traceback
+        error_detail = traceback.format_exc()
+        print(f"[Origin Plot] 错误详情:\n{error_detail}")
+        raise HTTPException(status_code=500, detail=f"Origin绘图失败: {str(e)}")
+
+
+@app.post("/origin/plot-xyz")
+async def origin_plot_xyz(request: OriginXYZPlotRequest):
+    """
+    使用Origin绘制3D/XYZ图表
+
+    支持: 3D曲面图、等高线图、热图等
+    """
+    try:
+        from origin_plotter import OriginPlotter, GraphType, GraphConfig, WorksheetData, DataColumn, PlotRequest
+
+        columns = [
+            DataColumn("X", request.x_data, axis="X"),
+            DataColumn("Y", request.y_data, axis="Y"),
+            DataColumn("Z", request.z_data, axis="Z")
+        ]
+        data = WorksheetData(name="XYZData", columns=columns)
+
+        graph_type_map = {
+            "surface": GraphType.SURFACE,
+            "surface_colormap": GraphType.SURFACE_COLORMAP,
+            "contour": GraphType.CONTOUR,
+            "xyz_contour": GraphType.XYZ_CONTOUR,
+            "tri_contour": GraphType.TRI_CONTOUR,
+            "heatmap": GraphType.HEATMAP,
+        }
+        graph_type = graph_type_map.get(request.graph_type, GraphType.SURFACE_COLORMAP)
+
+        graph_config = GraphConfig(
+            name=request.title or "XYZPlot",
+            title=request.title,
+            width=request.width,
+            height=request.height
+        )
+
+        plot_request = PlotRequest(
+            data=data,
+            graph_type=graph_type,
+            config=graph_config
+        )
+
+        with OriginPlotter(show_origin=False) as plotter:
+            result = plotter.plot(plot_request)
+            # 应用颜色映射
+            if result["success"] and request.colormap:
+                plotter.execute_labtalk(f'{result.get("graph_name", "GraphLayer")} -cmap {request.colormap}')
+
+        return result
+
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail=f"Origin绘图模块不可用: {str(e)}")
+    except Exception as e:
+        import traceback
+        error_detail = traceback.format_exc()
+        print(f"[Origin XYZ Plot] 错误详情:\n{error_detail}")
+        raise HTTPException(status_code=500, detail=f"Origin XYZ绘图失败: {str(e)}")
+
+
+@app.post("/origin/plot-multi")
+async def origin_plot_multi(request: OriginBatchPlotRequest):
+    """
+    使用Origin绘制多层图表
+
+    将多个数据集绘制在不同的面板中
+    """
+    try:
+        from origin_plotter import OriginPlotter, WorksheetData, DataColumn
+
+        datasets = []
+        for i, ds in enumerate(request.datasets):
+            columns = [
+                DataColumn("X", ds.get('x_data', []), axis="X"),
+                DataColumn("Y", ds.get('y_data', []), axis="Y")
+            ]
+            datasets.append(WorksheetData(name=f"Data{i+1}", columns=columns))
+
+        with OriginPlotter(show_origin=False) as plotter:
+            result = plotter.plot_multi_layer(
+                datasets=[{"x": ds.get('x_data', []), "y": ds.get('y_data', [])} for ds in request.datasets],
+                template=request.template
+            )
+
+        return result
+
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail=f"Origin绘图模块不可用: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Origin多层绘图失败: {str(e)}")
+
+
+@app.post("/origin/execute-labtalk")
+async def execute_labtalk(request: OriginLabTalkRequest):
+    """
+    执行LabTalk脚本命令
+
+    LabTalk是Origin的脚本语言，可用于高级操作
+    """
+    try:
+        from origin_plotter import OriginPlotter
+
+        with OriginPlotter(show_origin=False) as plotter:
+            success = plotter.execute_labtalk(request.command)
+
+        return {
+            "success": success,
+            "message": "LabTalk命令执行成功" if success else "LabTalk命令执行失败"
+        }
+
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail=f"Origin绘图模块不可用: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"LabTalk命令执行失败: {str(e)}")
+
+
+@app.post("/origin/plot-from-extracted")
+async def origin_plot_from_extracted(request: dict):
+    """
+    使用从图表中提取的数据在Origin中重新绘图
+
+    这个端点将数据提取功能和Origin绘图功能连接起来
+    """
+    try:
+        from origin_plotter import OriginPlotter, GraphType, ExportFormat, GraphConfig, AxisConfig, WorksheetData, DataColumn, PlotRequest
+
+        data_points = request.get("data", [])
+        config = request.get("config", {})
+
+        if not data_points:
+            raise HTTPException(status_code=400, detail="没有数据可绘制")
+
+        # 分离X和Y数据
+        x_data = [p["x"] for p in data_points]
+        y_data = [p["y"] for p in data_points]
+
+        columns = [
+            DataColumn("X", x_data, axis="X"),
+            DataColumn("Y", y_data, axis="Y")
+        ]
+        ws_data = WorksheetData(name="ExtractedData", columns=columns)
+
+        graph_type = config.get("graph_type", "line")
+        graph_type_map = {
+            "line": GraphType.LINE,
+            "scatter": GraphType.SCATTER,
+            "line_symbol": GraphType.LINE_SYMBOL,
+        }
+        graph_type_enum = graph_type_map.get(graph_type, GraphType.LINE)
+
+        graph_config = GraphConfig(
+            name=config.get("name", "ExtractedDataPlot"),
+            title=config.get("title", "从图表提取的数据"),
+            width=config.get("width", 800),
+            height=config.get("height", 600),
+            x_axis=AxisConfig(title=config.get("x_title", "X")),
+            y_axis=AxisConfig(title=config.get("y_title", "Y"))
+        )
+
+        export_format_map = {
+            "png": ExportFormat.PNG,
+            "pdf": ExportFormat.PDF,
+            "svg": ExportFormat.SVG,
+        }
+        export_format = export_format_map.get(config.get("export_format", "png"), ExportFormat.PNG)
+
+        plot_request = PlotRequest(
+            data=ws_data,
+            graph_type=graph_type_enum,
+            config=graph_config,
+            export_format=export_format
+        )
+
+        with OriginPlotter(show_origin=config.get("show_origin", False)) as plotter:
+            result = plotter.plot(plot_request)
+
+        return result
+
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail=f"Origin绘图模块不可用: {str(e)}")
+    except Exception as e:
+        import traceback
+        error_detail = traceback.format_exc()
+        print(f"[Origin Plot From Extracted] 错误详情:\n{error_detail}")
+        raise HTTPException(status_code=500, detail=f"Origin绘图失败: {str(e)}")
 
 
 if __name__ == "__main__":

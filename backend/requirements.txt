@@ -22,3 +22,6 @@ torchvision==0.16.0
 # SAM 模型
 ultralytics>=8.2.0      # 用于 SAM
 
+# Origin 绘图依赖
+originpro>=1.0.0        # Origin Python API (需要 Origin 2021+, 仅Windows)
+

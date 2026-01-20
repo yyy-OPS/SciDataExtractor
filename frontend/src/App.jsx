@@ -4,6 +4,7 @@ import ControlPanel from './components/ControlPanel'
 import AIConfigHeader from './components/AIConfigHeader'
 import DataPreview from './components/DataPreview'
 import LayerEditor from './components/LayerEditor'
+import OriginPlotPanel from './components/OriginPlotPanel'
 import './App.css'
 
 const API_BASE = 'http://localhost:8000'
@@ -13,6 +14,9 @@ function App() {
   const [sessionId, setSessionId] = useState(null)
   const [uploadedImage, setUploadedImage] = useState(null)
   const [currentStep, setCurrentStep] = useState(1) // 1: 上传, 2: 校准, 3: 采样, 3.5: 框选范围, 4: 提取
+
+  // Origin绘图面板状态
+  const [showOriginPanel, setShowOriginPanel] = useState(false)
 
   // 校准数据
   const [calibrationPoints, setCalibrationPoints] = useState({
@@ -827,6 +831,26 @@ function App() {
 
   return (
     <div className="min-h-screen bg-gray-100">
+      {/* Origin绘图面板 - 模态显示 */}
+      {showOriginPanel && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="relative w-full max-w-6xl my-8">
+            <button
+              onClick={() => setShowOriginPanel(false)}
+              className="absolute -top-12 right-0 text-white hover:text-gray-200 transition"
+            >
+              <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+            <OriginPlotPanel
+              extractedData={extractedData.length > 0 ? extractedData : null}
+              onClose={() => setShowOriginPanel(false)}
+            />
+          </div>
+        </div>
+      )}
+
       {/* 标题栏 */}
       <header className="bg-blue-600 text-white py-4 shadow-lg">
         <div className="container mx-auto px-4 flex justify-between items-center">
@@ -835,6 +859,16 @@ function App() {
             <p className="text-blue-100 mt-1">科学图表数据提取工具 - 支持图层编辑</p>
           </div>
           <div className="flex items-center gap-4">
+            {/* Origin绘图按钮 */}
+            <button
+              onClick={() => setShowOriginPanel(true)}
+              className="px-4 py-2 bg-gradient-to-r from-orange-500 to-amber-500 text-white rounded-lg hover:from-orange-600 hover:to-amber-600 transition font-medium flex items-center gap-2"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+              </svg>
+              Origin绘图
+            </button>
             {/* 模式切换按钮 */}
             {uploadedImage && (
               <button
