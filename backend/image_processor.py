@@ -1245,7 +1245,8 @@ class ImageProcessor:
     def extract_data_from_curve_points(
         self,
         skeleton_points: List[List[int]],
-        downsample_factor: int = 1
+        downsample_factor: int = 1,
+        smoothness: int = 0
     ) -> List[Tuple[float, float]]:
         """
         从曲线骨架点提取物理坐标数据
@@ -1253,6 +1254,7 @@ class ImageProcessor:
         参数:
             skeleton_points: 骨架点列表 [[x1,y1], [x2,y2], ...]
             downsample_factor: 降采样因子
+            smoothness: 平滑度 (0-10)，0 表示不平滑
 
         返回:
             物理坐标点列表 [(x1, y1), (x2, y2), ...]
@@ -1276,6 +1278,10 @@ class ImageProcessor:
         # 去除重复的 X 值（取平均 Y）
         if len(physical_points) > 0:
             physical_points = self._merge_duplicate_x(physical_points)
+
+        # 应用平滑
+        if smoothness > 0 and len(physical_points) > 2:
+            physical_points = self._apply_smoothing(physical_points, smoothness)
 
         return physical_points
 
@@ -1302,6 +1308,46 @@ class ImageProcessor:
 
         merged.append((current_x, np.median(y_values)))
         return merged
+
+    def _apply_smoothing(
+        self,
+        points: List[Tuple[float, float]],
+        smoothness: int
+    ) -> List[Tuple[float, float]]:
+        """
+        对数据点应用平滑处理
+
+        参数:
+            points: 数据点列表 [(x1, y1), (x2, y2), ...]
+            smoothness: 平滑度 (1-10)
+
+        返回:
+            平滑后的数据点列表
+        """
+        if len(points) < 3 or smoothness <= 0:
+            return points
+
+        # 将平滑度映射到窗口大小 (3-21，必须是奇数)
+        window_size = min(2 * smoothness + 1, len(points))
+        if window_size % 2 == 0:
+            window_size -= 1
+
+        # 提取 X 和 Y 值
+        x_values = np.array([p[0] for p in points])
+        y_values = np.array([p[1] for p in points])
+
+        # 使用移动平均平滑 Y 值
+        smoothed_y = np.convolve(y_values, np.ones(window_size) / window_size, mode='same')
+
+        # 边界处理：使用原始值
+        half_window = window_size // 2
+        smoothed_y[:half_window] = y_values[:half_window]
+        smoothed_y[-half_window:] = y_values[-half_window:]
+
+        # 重新组合
+        smoothed_points = [(float(x), float(y)) for x, y in zip(x_values, smoothed_y)]
+
+        return smoothed_points
 
 
 # ==================== 测试代码 ====================

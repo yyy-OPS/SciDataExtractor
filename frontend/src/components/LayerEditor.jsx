@@ -5,7 +5,7 @@ import useImage from 'use-image'
 const API_BASE = 'http://localhost:8000'
 
 /**
- * LayerEditor - Photoshop 风格的图层编辑器 v2.1
+ * LayerEditor - Photoshop 风格的图层编辑器 v3.0
  *
  * 新功能:
  * - 自动检测曲线并显示轮廓线
@@ -13,6 +13,15 @@ const API_BASE = 'http://localhost:8000'
  * - 支持用户编辑轮廓线
  * - 基于编辑后的轮廓提取数据
  * - SAM 2 智能分割支持 (Meta 2024)
+ *
+ * v3.0 新增功能:
+ * - 新建图层、手动描绘、删除图层
+ * - 撤回/重做操作历史
+ * - 显示 XY 轴信息
+ * - 框选删除线段
+ * - 端点自动匹配连续绘制
+ * - 线段粗细和透明度调整
+ * - 数据提取密集度和平滑度设置
  */
 const LayerEditor = ({
   sessionId,
@@ -25,13 +34,22 @@ const LayerEditor = ({
   const [curves, setCurves] = useState([]) // 检测到的曲线列表
   const [selectedCurveId, setSelectedCurveId] = useState(null) // 当前选中曲线
   const [overlayImage, setOverlayImage] = useState(null) // 叠加预览图
-  const [tool, setTool] = useState('select') // 当前工具: select, draw, erase
+  const [tool, setTool] = useState('select') // 当前工具: select, draw, erase, box_erase
   const [brushSize, setBrushSize] = useState(5)
   const [isDrawing, setIsDrawing] = useState(false)
   const [drawingPoints, setDrawingPoints] = useState([]) // 当前绘制的点
   const [isLoading, setIsLoading] = useState(false)
   const [message, setMessage] = useState('')
-  const [samStatus, setSamStatus] = useState(null) // SAM 2 状态
+  // v3.0 新增状态
+  const [history, setHistory] = useState([]) // 操作历史
+  const [historyIndex, setHistoryIndex] = useState(-1) // 当前历史索引
+  const [lineWidth, setLineWidth] = useState(2) // 线段粗细
+  const [lineOpacity, setLineOpacity] = useState(0.8) // 线段透明度
+  const [downsampleFactor, setDownsampleFactor] = useState(1) // 采样密度
+  const [smoothness, setSmoothness] = useState(0) // 平滑度
+  const [boxSelection, setBoxSelection] = useState(null) // 框选区域 {x1, y1, x2, y2}
+  const [isBoxSelecting, setIsBoxSelecting] = useState(false) // 是否正在框选
+  const [showAxes, setShowAxes] = useState(true) // 显示坐标轴
 
   // Canvas 相关
   const [image] = useImage(imageUrl, 'anonymous')
@@ -67,20 +85,47 @@ const LayerEditor = ({
     }
   }, [image])
 
-  // ========== 检查 SAM 2 状态 ==========
+
+  // ========== 历史记录管理 ==========
+  const saveToHistory = useCallback((newCurves) => {
+    const newHistory = history.slice(0, historyIndex + 1)
+    newHistory.push(JSON.parse(JSON.stringify(newCurves)))
+    setHistory(newHistory)
+    setHistoryIndex(newHistory.length - 1)
+  }, [history, historyIndex])
+
+  const undo = useCallback(() => {
+    if (historyIndex > 0) {
+      setHistoryIndex(historyIndex - 1)
+      setCurves(JSON.parse(JSON.stringify(history[historyIndex - 1])))
+      setMessage('已撤回')
+    }
+  }, [history, historyIndex])
+
+  const redo = useCallback(() => {
+    if (historyIndex < history.length - 1) {
+      setHistoryIndex(historyIndex + 1)
+      setCurves(JSON.parse(JSON.stringify(history[historyIndex + 1])))
+      setMessage('已重做')
+    }
+  }, [history, historyIndex])
+
+  // 键盘快捷键
   useEffect(() => {
-    const checkSamStatus = async () => {
-      try {
-        const response = await fetch(`${API_BASE}/process/sam-status`)
-        const data = await response.json()
-        setSamStatus(data)
-      } catch (error) {
-        console.error('检查 SAM 状态失败:', error)
-        setSamStatus({ available: false, model_type: 'unknown' })
+    const handleKeyDown = (e) => {
+      if (e.ctrlKey || e.metaKey) {
+        if (e.key === 'z' && !e.shiftKey) {
+          e.preventDefault()
+          undo()
+        } else if (e.key === 'z' && e.shiftKey || e.key === 'y') {
+          e.preventDefault()
+          redo()
+        }
       }
     }
-    checkSamStatus()
-  }, [])
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [undo, redo])
 
   // ========== 自动检测曲线 ==========
   const handleDetectCurves = async () => {
@@ -108,6 +153,7 @@ const LayerEditor = ({
 
       if (data.success) {
         setCurves(data.curves)
+        saveToHistory(data.curves)
         setOverlayImage(data.original_with_overlay)
         if (data.curves.length > 0) {
           setSelectedCurveId(data.curves[0].id)
@@ -121,6 +167,37 @@ const LayerEditor = ({
     } finally {
       setIsLoading(false)
     }
+  }
+
+  // ========== 新建图层 ==========
+  const handleCreateNewLayer = () => {
+    const newLayer = {
+      id: `layer_${Date.now()}`,
+      name: `图层 ${curves.length + 1}`,
+      color_rgb: [Math.random() * 255, Math.random() * 255, Math.random() * 255],
+      skeleton_points: [],
+      visible: true,
+      mask_base64: null
+    }
+    const newCurves = [...curves, newLayer]
+    setCurves(newCurves)
+    saveToHistory(newCurves)
+    setSelectedCurveId(newLayer.id)
+    setMessage(`已创建新图层: ${newLayer.name}`)
+  }
+
+  // ========== 删除图层 ==========
+  const handleDeleteLayer = (layerId) => {
+    if (!confirm('确定要删除这个图层吗？')) return
+
+    const newCurves = curves.filter(c => c.id !== layerId)
+    setCurves(newCurves)
+    saveToHistory(newCurves)
+
+    if (selectedCurveId === layerId) {
+      setSelectedCurveId(newCurves.length > 0 ? newCurves[0].id : null)
+    }
+    setMessage('图层已删除')
   }
 
   // ========== 更新叠加预览 ==========
@@ -170,11 +247,45 @@ const LayerEditor = ({
   }
 
   // ========== 绘制功能 ==========
-  const handleMouseDown = (e) => {
-    if (tool === 'select') return
+  // 查找最近的端点
+  const findNearestEndpoint = (point, curve, threshold = 20) => {
+    if (!curve || !curve.skeleton_points || curve.skeleton_points.length === 0) {
+      return null
+    }
 
+    const points = curve.skeleton_points
+    const endpoints = [points[0], points[points.length - 1]]
+
+    let nearest = null
+    let minDist = threshold
+
+    endpoints.forEach(ep => {
+      const dist = Math.sqrt(Math.pow(ep[0] - point[0], 2) + Math.pow(ep[1] - point[1], 2))
+      if (dist < minDist) {
+        minDist = dist
+        nearest = ep
+      }
+    })
+
+    return nearest
+  }
+
+  const handleMouseDown = (e) => {
     const stage = e.target.getStage()
     const pos = stage.getPointerPosition()
+
+    // 转换为图像坐标
+    const imageX = Math.round((pos.x - stagePos.x) / scale * (imageSize.width / stageSize.width))
+    const imageY = Math.round((pos.y - stagePos.y) / scale * (imageSize.height / stageSize.height))
+
+    if (tool === 'box_erase') {
+      // 框选删除模式
+      setIsBoxSelecting(true)
+      setBoxSelection({ x1: imageX, y1: imageY, x2: imageX, y2: imageY })
+      return
+    }
+
+    if (tool === 'select') return
 
     if (tool === 'draw' || tool === 'erase') {
       if (!selectedCurveId) {
@@ -184,16 +295,21 @@ const LayerEditor = ({
       setIsDrawing(true)
       lastPointRef.current = pos
 
-      // 转换为图像坐标
-      const imageX = Math.round((pos.x - stagePos.x) / scale * (imageSize.width / stageSize.width))
-      const imageY = Math.round((pos.y - stagePos.y) / scale * (imageSize.height / stageSize.height))
-      setDrawingPoints([[imageX, imageY]])
+      // 检查是否靠近端点
+      const curve = curves.find(c => c.id === selectedCurveId)
+      const nearestEndpoint = findNearestEndpoint([imageX, imageY], curve, 30)
+
+      if (nearestEndpoint && tool === 'draw') {
+        // 从端点开始绘制
+        setDrawingPoints([nearestEndpoint, [imageX, imageY]])
+        setMessage('已连接到端点')
+      } else {
+        setDrawingPoints([[imageX, imageY]])
+      }
     }
   }
 
   const handleMouseMove = (e) => {
-    if (!isDrawing || (tool !== 'draw' && tool !== 'erase')) return
-
     const stage = e.target.getStage()
     const pos = stage.getPointerPosition()
 
@@ -201,11 +317,27 @@ const LayerEditor = ({
     const imageX = Math.round((pos.x - stagePos.x) / scale * (imageSize.width / stageSize.width))
     const imageY = Math.round((pos.y - stagePos.y) / scale * (imageSize.height / stageSize.height))
 
+    if (isBoxSelecting && tool === 'box_erase') {
+      // 更新框选区域
+      setBoxSelection(prev => ({ ...prev, x2: imageX, y2: imageY }))
+      return
+    }
+
+    if (!isDrawing || (tool !== 'draw' && tool !== 'erase')) return
+
     setDrawingPoints(prev => [...prev, [imageX, imageY]])
     lastPointRef.current = pos
   }
 
   const handleMouseUp = async () => {
+    if (isBoxSelecting && tool === 'box_erase') {
+      // 执行框选删除
+      await handleBoxErase()
+      setIsBoxSelecting(false)
+      setBoxSelection(null)
+      return
+    }
+
     if (!isDrawing) return
     setIsDrawing(false)
 
@@ -228,12 +360,12 @@ const LayerEditor = ({
       let newPoints
       if (tool === 'draw') {
         // 添加模式：合并新点
-        newPoints = [...curve.skeleton_points, ...drawingPoints]
+        newPoints = [...(curve.skeleton_points || []), ...drawingPoints]
         // 按 X 排序
         newPoints.sort((a, b) => a[0] - b[0])
       } else {
         // 擦除模式：移除附近的点
-        newPoints = curve.skeleton_points.filter(pt => {
+        newPoints = (curve.skeleton_points || []).filter(pt => {
           return !drawingPoints.some(dp =>
             Math.abs(pt[0] - dp[0]) < brushSize * 2 &&
             Math.abs(pt[1] - dp[1]) < brushSize * 2
@@ -241,38 +373,122 @@ const LayerEditor = ({
         })
       }
 
-      // 调用后端更新曲线
-      const response = await fetch(`${API_BASE}/process/update-curve`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          session_id: sessionId,
-          curve_id: selectedCurveId,
-          edited_points: newPoints,
-          original_mask_base64: curve.mask_base64
-        })
-      })
-
-      const data = await response.json()
-
-      if (data.success) {
-        // 更新曲线数据
-        const updatedCurves = curves.map(c =>
-          c.id === selectedCurveId
-            ? { ...c, skeleton_points: data.curve.skeleton_points, mask_base64: data.curve.mask_base64 }
-            : c
-        )
-        setCurves(updatedCurves)
-        updateOverlay(updatedCurves, selectedCurveId)
-        setMessage('曲线更新成功')
-      } else {
-        setMessage(`更新失败: ${data.message}`)
-      }
+      // 更新曲线数据
+      const updatedCurves = curves.map(c =>
+        c.id === selectedCurveId
+          ? { ...c, skeleton_points: newPoints }
+          : c
+      )
+      setCurves(updatedCurves)
+      saveToHistory(updatedCurves)
+      setMessage('曲线更新成功')
     } catch (error) {
       setMessage(`更新错误: ${error.message}`)
     } finally {
       setIsLoading(false)
     }
+  }
+
+  // ========== 框选删除 ==========
+  const handleBoxErase = () => {
+    if (!boxSelection || !selectedCurveId) return
+
+    const curve = curves.find(c => c.id === selectedCurveId)
+    if (!curve || !curve.skeleton_points || curve.skeleton_points.length < 2) return
+
+    const { x1, y1, x2, y2 } = boxSelection
+    const minX = Math.min(x1, x2)
+    const maxX = Math.max(x1, x2)
+    const minY = Math.min(y1, y2)
+    const maxY = Math.max(y1, y2)
+
+    console.log('=== 框选删除开始 ===')
+    console.log('框选区域:', { minX, maxX, minY, maxY })
+    console.log('曲线点数:', curve.skeleton_points.length)
+
+    // 找出所有与框相交的线段索引
+    const segmentsToDelete = new Set()
+    const points = curve.skeleton_points
+
+    for (let i = 0; i < points.length - 1; i++) {
+      const p1 = points[i]
+      const p2 = points[i + 1]
+
+      // 检查线段是否与矩形相交
+      const intersects = lineSegmentIntersectsRect(p1, p2, minX, minY, maxX, maxY)
+
+      if (i < 5 || intersects) {  // 只打印前5个或相交的
+        console.log(`线段 ${i}-${i+1}:`, p1, '→', p2, '相交:', intersects)
+      }
+
+      if (intersects) {
+        segmentsToDelete.add(i)
+        segmentsToDelete.add(i + 1)
+      }
+    }
+
+    console.log('要删除的点索引:', Array.from(segmentsToDelete).sort((a, b) => a - b))
+    console.log('删除前点数:', points.length)
+
+    // 删除相交线段的所有点
+    const newPoints = points.filter((pt, idx) => !segmentsToDelete.has(idx))
+
+    console.log('删除后点数:', newPoints.length)
+    console.log('=== 框选删除结束 ===')
+
+    const updatedCurves = curves.map(c =>
+      c.id === selectedCurveId
+        ? { ...c, skeleton_points: newPoints }
+        : c
+    )
+    setCurves(updatedCurves)
+    saveToHistory(updatedCurves)
+    setMessage(`已删除框选区域内的 ${segmentsToDelete.size} 个点（${Math.floor(segmentsToDelete.size / 2)} 段线段）`)
+  }
+
+  // 判断线段是否与矩形相交
+  const lineSegmentIntersectsRect = (p1, p2, minX, minY, maxX, maxY) => {
+    const [x1, y1] = p1
+    const [x2, y2] = p2
+
+    // 检查端点是否在矩形内
+    const p1Inside = x1 >= minX && x1 <= maxX && y1 >= minY && y1 <= maxY
+    const p2Inside = x2 >= minX && x2 <= maxX && y2 >= minY && y2 <= maxY
+
+    if (p1Inside || p2Inside) return true
+
+    // 检查线段是否与矩形的四条边相交
+    // 矩形四条边
+    const rectEdges = [
+      [[minX, minY], [maxX, minY]], // 上边
+      [[maxX, minY], [maxX, maxY]], // 右边
+      [[maxX, maxY], [minX, maxY]], // 下边
+      [[minX, maxY], [minX, minY]]  // 左边
+    ]
+
+    for (const edge of rectEdges) {
+      if (lineSegmentsIntersect(p1, p2, edge[0], edge[1])) {
+        return true
+      }
+    }
+
+    return false
+  }
+
+  // 判断两条线段是否相交
+  const lineSegmentsIntersect = (p1, p2, p3, p4) => {
+    const [x1, y1] = p1
+    const [x2, y2] = p2
+    const [x3, y3] = p3
+    const [x4, y4] = p4
+
+    const denom = (y4 - y3) * (x2 - x1) - (x4 - x3) * (y2 - y1)
+    if (Math.abs(denom) < 1e-10) return false // 平行或共线
+
+    const ua = ((x4 - x3) * (y1 - y3) - (y4 - y3) * (x1 - x3)) / denom
+    const ub = ((x2 - x1) * (y1 - y3) - (y2 - y1) * (x1 - x3)) / denom
+
+    return ua >= 0 && ua <= 1 && ub >= 0 && ub <= 1
   }
 
   // ========== 从曲线提取数据 ==========
@@ -320,7 +536,8 @@ const LayerEditor = ({
               real_value: calibrationPoints.yEnd.value
             }
           },
-          downsample_factor: 1
+          downsample_factor: downsampleFactor,
+          smoothness: smoothness
         })
       })
 
@@ -341,7 +558,7 @@ const LayerEditor = ({
     }
   }
 
-  // ========== 缩放和平移 ==========
+  // ========== 缩放和拖动 ==========
   const handleWheel = (e) => {
     e.evt.preventDefault()
     const scaleBy = 1.1
@@ -385,8 +602,8 @@ const LayerEditor = ({
           key={curve.id}
           points={points}
           stroke={color}
-          strokeWidth={isSelected ? 3 : 2}
-          opacity={isSelected ? 1 : 0.7}
+          strokeWidth={isSelected ? lineWidth + 1 : lineWidth}
+          opacity={isSelected ? lineOpacity : lineOpacity * 0.7}
           lineCap="round"
           lineJoin="round"
           shadowColor={isSelected ? 'white' : undefined}
@@ -394,6 +611,69 @@ const LayerEditor = ({
         />
       )
     })
+  }
+
+  // ========== 渲染坐标轴 ==========
+  const renderAxes = () => {
+    if (!showAxes || !calibrationPoints) return null
+
+    const toCanvasX = (px) => px * (stageSize.width / imageSize.width)
+    const toCanvasY = (py) => py * (stageSize.height / imageSize.height)
+
+    return (
+      <>
+        {/* X 轴 */}
+        <Line
+          points={[
+            toCanvasX(calibrationPoints.xStart.pixel.x),
+            toCanvasY(calibrationPoints.xStart.pixel.y),
+            toCanvasX(calibrationPoints.xEnd.pixel.x),
+            toCanvasY(calibrationPoints.xEnd.pixel.y)
+          ]}
+          stroke="#00ff00"
+          strokeWidth={2}
+          dash={[5, 5]}
+          opacity={0.6}
+        />
+        {/* Y 轴 */}
+        <Line
+          points={[
+            toCanvasX(calibrationPoints.yStart.pixel.x),
+            toCanvasY(calibrationPoints.yStart.pixel.y),
+            toCanvasX(calibrationPoints.yEnd.pixel.x),
+            toCanvasY(calibrationPoints.yEnd.pixel.y)
+          ]}
+          stroke="#ff00ff"
+          strokeWidth={2}
+          dash={[5, 5]}
+          opacity={0.6}
+        />
+      </>
+    )
+  }
+
+  // ========== 渲染框选矩形 ==========
+  const renderBoxSelection = () => {
+    if (!boxSelection || !isBoxSelecting) return null
+
+    const { x1, y1, x2, y2 } = boxSelection
+    const canvasX1 = x1 * (stageSize.width / imageSize.width)
+    const canvasY1 = y1 * (stageSize.height / imageSize.height)
+    const canvasX2 = x2 * (stageSize.width / imageSize.width)
+    const canvasY2 = y2 * (stageSize.height / imageSize.height)
+
+    return (
+      <Rect
+        x={Math.min(canvasX1, canvasX2)}
+        y={Math.min(canvasY1, canvasY2)}
+        width={Math.abs(canvasX2 - canvasX1)}
+        height={Math.abs(canvasY2 - canvasY1)}
+        stroke="#ff0000"
+        strokeWidth={2}
+        dash={[5, 5]}
+        fill="rgba(255, 0, 0, 0.1)"
+      />
+    )
   }
 
   // ========== 渲染当前绘制的线 ==========
@@ -432,6 +712,36 @@ const LayerEditor = ({
           <span>自动检测曲线</span>
         </button>
 
+        {/* 新建图层按钮 */}
+        <button
+          onClick={handleCreateNewLayer}
+          disabled={isLoading}
+          className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:bg-gray-400 transition flex items-center gap-2"
+        >
+          <span>➕</span>
+          <span>新建图层</span>
+        </button>
+
+        {/* 撤回/重做 */}
+        <div className="flex gap-1 border-l pl-2 ml-2">
+          <button
+            onClick={undo}
+            disabled={historyIndex <= 0}
+            className="px-3 py-2 rounded bg-gray-200 hover:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed"
+            title="撤回 (Ctrl+Z)"
+          >
+            ↶
+          </button>
+          <button
+            onClick={redo}
+            disabled={historyIndex >= history.length - 1}
+            className="px-3 py-2 rounded bg-gray-200 hover:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed"
+            title="重做 (Ctrl+Y)"
+          >
+            ↷
+          </button>
+        </div>
+
         {/* 工具选择 */}
         <div className="flex gap-1 border-l pl-2 ml-2">
           <button
@@ -444,7 +754,7 @@ const LayerEditor = ({
           <button
             onClick={() => setTool('draw')}
             className={`px-3 py-2 rounded ${tool === 'draw' ? 'bg-green-500 text-white' : 'bg-gray-200 hover:bg-gray-300'}`}
-            title="绘制工具 - 补充轮廓"
+            title="绘制工具 - 补充轮廓 (自动连接端点)"
           >
             ✏️
           </button>
@@ -454,6 +764,13 @@ const LayerEditor = ({
             title="擦除工具 - 删除轮廓"
           >
             🧹
+          </button>
+          <button
+            onClick={() => setTool('box_erase')}
+            className={`px-3 py-2 rounded ${tool === 'box_erase' ? 'bg-orange-500 text-white' : 'bg-gray-200 hover:bg-gray-300'}`}
+            title="框选删除 - 删除区域内的线段"
+          >
+            ⬚
           </button>
         </div>
 
@@ -473,19 +790,14 @@ const LayerEditor = ({
           </div>
         )}
 
-        {/* SAM 2 状态指示器 */}
-        {samStatus && (
-          <div className={`flex items-center gap-2 border-l pl-2 ml-2 px-3 py-1 rounded-lg text-sm ${
-            samStatus.available ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'
-          }`}>
-            <span className={`w-2 h-2 rounded-full ${samStatus.available ? 'bg-green-500' : 'bg-yellow-500'}`}></span>
-            <span>
-              {samStatus.available
-                ? `${samStatus.model_info?.is_sam2 ? 'SAM 2' : 'SAM'} (${samStatus.model_info?.device || 'CPU'})`
-                : '备用分割模式'}
-            </span>
-          </div>
-        )}
+        {/* 显示坐标轴切换 */}
+        <button
+          onClick={() => setShowAxes(!showAxes)}
+          className={`px-3 py-2 rounded border-l ml-2 ${showAxes ? 'bg-green-100 text-green-700' : 'bg-gray-200'}`}
+          title="显示/隐藏坐标轴"
+        >
+          {showAxes ? '📐 显示坐标轴' : '📐 隐藏坐标轴'}
+        </button>
 
         {/* 提取数据按钮 */}
         {selectedCurveId && calibrationPoints && (
@@ -500,41 +812,117 @@ const LayerEditor = ({
         )}
       </div>
 
+      {/* 线段样式和提取参数设置 */}
+      <div className="flex flex-wrap gap-4 mb-4 p-3 bg-blue-50 rounded-lg">
+        {/* 线段粗细 */}
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-gray-700 font-medium">线段粗细:</span>
+          <input
+            type="range"
+            min="1"
+            max="10"
+            value={lineWidth}
+            onChange={(e) => setLineWidth(parseInt(e.target.value))}
+            className="w-24"
+          />
+          <span className="text-sm text-gray-600">{lineWidth}px</span>
+        </div>
+
+        {/* 线段透明度 */}
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-gray-700 font-medium">透明度:</span>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            value={lineOpacity * 100}
+            onChange={(e) => setLineOpacity(parseInt(e.target.value) / 100)}
+            className="w-24"
+          />
+          <span className="text-sm text-gray-600">{Math.round(lineOpacity * 100)}%</span>
+        </div>
+
+        {/* 采样密度 */}
+        <div className="flex items-center gap-2 border-l pl-4">
+          <span className="text-sm text-gray-700 font-medium">采样密度:</span>
+          <input
+            type="number"
+            min="1"
+            max="10"
+            value={downsampleFactor}
+            onChange={(e) => setDownsampleFactor(parseInt(e.target.value) || 1)}
+            className="w-16 px-2 py-1 border rounded"
+          />
+          <span className="text-xs text-gray-500">(1=最密集)</span>
+        </div>
+
+        {/* 平滑度 */}
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-gray-700 font-medium">平滑度:</span>
+          <input
+            type="range"
+            min="0"
+            max="10"
+            value={smoothness}
+            onChange={(e) => setSmoothness(parseInt(e.target.value))}
+            className="w-24"
+          />
+          <span className="text-sm text-gray-600">{smoothness}</span>
+        </div>
+      </div>
+
       {/* 曲线颜色按钮 */}
       {curves.length > 0 && (
         <div className="flex flex-wrap gap-2 mb-4 p-3 bg-gray-100 rounded-lg">
-          <span className="text-sm text-gray-600 self-center mr-2">曲线:</span>
+          <span className="text-sm text-gray-600 self-center mr-2">图层:</span>
           {curves.map(curve => (
-            <button
+            <div
               key={curve.id}
-              onClick={() => handleCurveSelect(curve.id)}
               className={`flex items-center gap-2 px-3 py-2 rounded-lg border-2 transition ${
                 selectedCurveId === curve.id
                   ? 'border-blue-500 bg-blue-50'
                   : 'border-gray-300 bg-white hover:border-gray-400'
               }`}
             >
-              {/* 颜色指示器 */}
-              <div
-                className="w-4 h-4 rounded-full border border-gray-400"
-                style={{
-                  backgroundColor: `rgb(${curve.color_rgb?.join(',') || '128,128,128'})`
-                }}
-              />
-              {/* 曲线名称 */}
-              <span className="text-sm font-medium">{curve.name}</span>
+              <button
+                onClick={() => handleCurveSelect(curve.id)}
+                className="flex items-center gap-2"
+              >
+                {/* 颜色指示器 */}
+                <div
+                  className="w-4 h-4 rounded-full border border-gray-400"
+                  style={{
+                    backgroundColor: `rgb(${curve.color_rgb?.join(',') || '128,128,128'})`
+                  }}
+                />
+                {/* 曲线名称 */}
+                <span className="text-sm font-medium">{curve.name}</span>
+              </button>
+
               {/* 可见性切换 */}
               <button
                 onClick={(e) => {
                   e.stopPropagation()
                   handleCurveVisibilityToggle(curve.id)
                 }}
-                className="ml-1 text-lg"
+                className="ml-1 text-lg hover:scale-110 transition"
                 title={curve.visible ? '隐藏' : '显示'}
               >
                 {curve.visible ? '👁️' : '🚫'}
               </button>
-            </button>
+
+              {/* 删除按钮 */}
+              <button
+                onClick={(e) => {
+                  e.stopPropagation()
+                  handleDeleteLayer(curve.id)
+                }}
+                className="ml-1 text-red-500 hover:text-red-700 hover:scale-110 transition"
+                title="删除图层"
+              >
+                🗑️
+              </button>
+            </div>
           ))}
         </div>
       )}
@@ -563,12 +951,19 @@ const LayerEditor = ({
           scaleY={scale}
           x={stagePos.x}
           y={stagePos.y}
+          draggable={tool === 'select'}
           onWheel={handleWheel}
           onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
           onMouseLeave={handleMouseUp}
-          style={{ cursor: tool === 'select' ? 'default' : 'crosshair' }}
+          onDragEnd={(e) => {
+            setStagePos({
+              x: e.target.x(),
+              y: e.target.y()
+            })
+          }}
+          style={{ cursor: tool === 'select' ? 'grab' : 'crosshair' }}
         >
           <Layer>
             {/* 原始图像 */}
@@ -584,7 +979,9 @@ const LayerEditor = ({
           {/* 曲线轮廓层 */}
           <Layer>
             {imageSize.width > 0 && renderCurveLines()}
+            {renderAxes()}
             {renderDrawingLine()}
+            {renderBoxSelection()}
           </Layer>
         </Stage>
       </div>
@@ -616,14 +1013,26 @@ const LayerEditor = ({
       {/* 使用说明 */}
       {curves.length === 0 && (
         <div className="mt-4 p-4 bg-blue-50 rounded-lg text-sm text-blue-800">
-          <h4 className="font-semibold mb-2">使用说明:</h4>
+          <h4 className="font-semibold mb-2">📖 使用说明 (v3.0):</h4>
           <ol className="list-decimal list-inside space-y-1">
-            <li>点击 <strong>"自动检测曲线"</strong> 识别图中所有颜色曲线</li>
-            <li>点击 <strong>颜色按钮</strong> 切换显示不同曲线的轮廓</li>
-            <li>使用 <strong>✏️ 绘制工具</strong> 补充断裂的轮廓线</li>
+            <li>点击 <strong>"自动检测曲线"</strong> 识别图中所有颜色曲线，或点击 <strong>"新建图层"</strong> 手动创建</li>
+            <li>点击 <strong>图层按钮</strong> 选择要编辑的图层</li>
+            <li>使用 <strong>✏️ 绘制工具</strong> 补充断裂的轮廓线（自动连接端点）</li>
             <li>使用 <strong>🧹 擦除工具</strong> 删除错误的轮廓部分</li>
+            <li>使用 <strong>⬚ 框选删除</strong> 批量删除区域内的线段</li>
+            <li>使用 <strong>Ctrl+Z / Ctrl+Y</strong> 撤回/重做操作</li>
+            <li>调整 <strong>线段粗细、透明度、采样密度、平滑度</strong> 等参数</li>
             <li>编辑完成后点击 <strong>"提取数据"</strong> 获取曲线数据</li>
           </ol>
+          <div className="mt-3 pt-3 border-t border-blue-200">
+            <p className="font-semibold mb-1">✨ 新功能:</p>
+            <ul className="list-disc list-inside space-y-1 text-xs">
+              <li>端点自动匹配：绘制时靠近端点会自动连接</li>
+              <li>框选删除：支持删除不连续线段</li>
+              <li>显示坐标轴：查看 XY 轴校准信息</li>
+              <li>历史记录：支持无限次撤回/重做</li>
+            </ul>
+          </div>
         </div>
       )}
     </div>

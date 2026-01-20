@@ -19,11 +19,12 @@ from image_processor import ImageProcessor
 
 # 导入 AI 分割模块
 try:
-    from ai_segmentation import SmartSegmenter, get_segmenter, CurveLayerManager, AdvancedCurveDetector, get_curve_detector
+    from ai_segmentation import SmartSegmenter, get_segmenter
     SAM_AVAILABLE = True
-except ImportError:
+    print("[Main] SAM 模块加载成功")
+except ImportError as e:
     SAM_AVAILABLE = False
-    print("[Main] AI 分割模块未加载，SAM 功能不可用")
+    print(f"[Main] SAM 模块未加载: {e}")
 
 # Load environment variables
 load_dotenv()
@@ -132,34 +133,6 @@ class AutoLayersRequest(BaseModel):
     exclude_background: bool = True
     min_saturation: int = 30
 
-
-class SAMPredictRequest(BaseModel):
-    """SAM 智能分割请求模型"""
-    session_id: str
-    point_x: int
-    point_y: int
-    point_label: int = 1  # 1=前景, 0=背景
-
-
-class SAMMultiPointRequest(BaseModel):
-    """SAM 多点分割请求模型"""
-    session_id: str
-    points: List[dict]  # [{"x": int, "y": int, "label": int}, ...]
-
-
-class MaskExtractionRequest(BaseModel):
-    """基于 Mask 的数据提取请求模型"""
-    session_id: str
-    mask_base64: str  # Base64 编码的 PNG 掩码
-    calibration: CalibrationData
-    start_point: Optional[dict] = None  # {"x": int, "y": int}
-    direction: str = "auto"  # 'left_to_right', 'right_to_left', 'auto'
-
-
-class MaskOperationRequest(BaseModel):
-    """掩码操作请求模型"""
-    session_id: str
-    mask1_base64: str
     mask2_base64: Optional[str] = None
     operation: str = "clean"  # 'clean', 'dilate', 'erode', 'fill_gaps', 'union', 'intersect', 'subtract'
     kernel_size: int = 3
@@ -204,6 +177,7 @@ class ExtractFromCurveRequest(BaseModel):
     skeleton_points: List[List[int]]
     calibration: CalibrationData
     downsample_factor: int = 1
+    smoothness: int = 0  # 平滑度参数 (0-10)
 
 
 # ==================== API Endpoints ====================
@@ -461,303 +435,30 @@ async def auto_detect_layers(request: AutoLayersRequest):
         raise HTTPException(status_code=500, detail=f"自动分层失败: {str(e)}")
 
 
-@app.post("/process/sam-predict")
-async def sam_predict(request: SAMPredictRequest):
-    """
-    SAM 智能分割 - 基于点击坐标进行智能分割
-
-    接收图片和点击坐标，调用 SAM，返回智能识别的 Mask 片段
-    """
-    if request.session_id not in processors:
-        raise HTTPException(status_code=404, detail="会话不存在，请先上传图片")
-
-    if request.session_id not in image_paths:
-        raise HTTPException(status_code=404, detail="图像路径不存在")
-
-    processor = processors[request.session_id]
-    image_path = image_paths[request.session_id]
-
-    try:
-        import cv2
-
-        # 读取图像
-        image = cv2.imread(image_path)
-        if image is None:
-            raise HTTPException(status_code=500, detail="无法读取图像")
-
-        # 获取分割器 (使用 SAM 2)
-        if SAM_AVAILABLE:
-            segmenter = get_segmenter("sam2_b")  # 使用 SAM 2 Base 模型
-            mask = segmenter.segment_click(
-                image,
-                (request.point_x, request.point_y),
-                request.point_label
-            )
-        else:
-            # 使用备用方法：基于颜色的区域分割
-            mask = processor.create_mask_from_color(
-                processor.sample_color_at_point(request.point_x, request.point_y).tolist(),
-                tolerance=25
-            )
-
-        if mask is None:
-            return {
-                "success": False,
-                "mask": None,
-                "message": "分割失败，未能识别目标区域"
-            }
-
-        # 转换为 Base64
-        mask_base64 = processor.mask_to_base64(mask)
-
-        return {
-            "success": True,
-            "mask": mask_base64,
-            "pixel_count": int(np.sum(mask > 127)),
-            "message": "智能分割成功"
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"SAM 分割失败: {str(e)}")
-
-
-@app.post("/process/sam-multi-point")
-async def sam_multi_point(request: SAMMultiPointRequest):
-    """
-    SAM 多点分割 - 基于多个点进行智能分割
-
-    支持同时指定前景点和背景点，提高分割精度
-    """
-    if request.session_id not in processors:
-        raise HTTPException(status_code=404, detail="会话不存在，请先上传图片")
-
-    if request.session_id not in image_paths:
-        raise HTTPException(status_code=404, detail="图像路径不存在")
-
-    processor = processors[request.session_id]
-    image_path = image_paths[request.session_id]
-
-    try:
-        import cv2
-
-        image = cv2.imread(image_path)
-        if image is None:
-            raise HTTPException(status_code=500, detail="无法读取图像")
-
-        # 解析点列表
-        points = [(p["x"], p["y"]) for p in request.points]
-        labels = [p.get("label", 1) for p in request.points]
-
-        if SAM_AVAILABLE:
-            segmenter = get_segmenter("sam2_b")  # 使用 SAM 2 Base 模型
-            mask = segmenter.segment_multi_points(image, points, labels)
-        else:
-            # 备用方法：使用第一个前景点
-            for pt, label in zip(points, labels):
-                if label == 1:
-                    mask = processor.create_mask_from_color(
-                        processor.sample_color_at_point(pt[0], pt[1]).tolist(),
-                        tolerance=25
-                    )
-                    break
-            else:
-                mask = None
-
-        if mask is None:
-            return {
-                "success": False,
-                "mask": None,
-                "message": "多点分割失败"
-            }
-
-        mask_base64 = processor.mask_to_base64(mask)
-
-        return {
-            "success": True,
-            "mask": mask_base64,
-            "pixel_count": int(np.sum(mask > 127)),
-            "message": "多点分割成功"
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"多点分割失败: {str(e)}")
-
-
-@app.post("/extract/mask")
-async def extract_from_mask(request: MaskExtractionRequest):
-    """
-    基于 Mask 提取曲线数据
-
-    接收用户最终修改好的 Mask 图片，调用动量追踪算法进行数据提取
-    """
-    if request.session_id not in processors:
-        raise HTTPException(status_code=404, detail="会话不存在，请先上传图片")
-
-    processor = processors[request.session_id]
-
-    try:
-        # 设置校准参数
-        processor.set_calibration(
-            x_axis_pixels=(
-                (request.calibration.x_start.pixel_x, request.calibration.x_start.pixel_y),
-                (request.calibration.x_end.pixel_x, request.calibration.x_end.pixel_y)
-            ),
-            x_axis_values=(
-                request.calibration.x_start.real_value,
-                request.calibration.x_end.real_value
-            ),
-            y_axis_pixels=(
-                (request.calibration.y_start.pixel_x, request.calibration.y_start.pixel_y),
-                (request.calibration.y_end.pixel_x, request.calibration.y_end.pixel_y)
-            ),
-            y_axis_values=(
-                request.calibration.y_start.real_value,
-                request.calibration.y_end.real_value
-            )
-        )
-
-        # 解码掩码
-        mask = processor.base64_to_mask(request.mask_base64)
-
-        # 解析起始点
-        start_point = None
-        if request.start_point:
-            start_point = (request.start_point["x"], request.start_point["y"])
-
-        # 使用动量追踪算法提取曲线
-        data_points = processor.extract_curve_from_mask(
-            mask,
-            start_point=start_point,
-            direction=request.direction
-        )
-
-        if len(data_points) == 0:
-            return {
-                "success": False,
-                "data": [],
-                "count": 0,
-                "message": "未能从 Mask 中提取到曲线数据"
-            }
-
-        result = [{"x": float(x), "y": float(y)} for x, y in data_points]
-
-        return {
-            "success": True,
-            "data": result,
-            "count": len(result),
-            "message": f"成功提取 {len(result)} 个数据点（动量追踪算法）"
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Mask 数据提取失败: {str(e)}")
-
-
-@app.post("/process/mask-operation")
-async def mask_operation(request: MaskOperationRequest):
-    """
-    掩码操作 - 形态学处理或掩码合并
-
-    支持的操作:
-    - clean: 清理噪点
-    - dilate: 膨胀
-    - erode: 腐蚀
-    - fill_gaps: 填充间隙
-    - union: 并集（需要 mask2）
-    - intersect: 交集（需要 mask2）
-    - subtract: 差集（需要 mask2）
-    """
-    if request.session_id not in processors:
-        raise HTTPException(status_code=404, detail="会话不存在，请先上传图片")
-
-    processor = processors[request.session_id]
-
-    try:
-        # 解码第一个掩码
-        mask1 = processor.base64_to_mask(request.mask1_base64)
-
-        # 判断操作类型
-        if request.operation in ["union", "intersect", "subtract"]:
-            # 需要第二个掩码
-            if not request.mask2_base64:
-                raise HTTPException(status_code=400, detail=f"操作 '{request.operation}' 需要提供 mask2_base64")
-
-            mask2 = processor.base64_to_mask(request.mask2_base64)
-            result_mask = processor.merge_masks(mask1, mask2, request.operation)
-        else:
-            # 形态学操作
-            result_mask = processor.refine_mask_with_morphology(
-                mask1,
-                operation=request.operation,
-                kernel_size=request.kernel_size
-            )
-
-        # 转换为 Base64
-        result_base64 = processor.mask_to_base64(result_mask)
-
-        return {
-            "success": True,
-            "mask": result_base64,
-            "pixel_count": int(np.sum(result_mask > 127)),
-            "message": f"掩码操作 '{request.operation}' 完成"
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"掩码操作失败: {str(e)}")
-
-
-@app.post("/process/composite-preview")
-async def composite_preview(request: CompositePreviewRequest):
-    """
-    生成图层合成预览图
-
-    将多个图层叠加到原图上，生成预览图像
-    """
-    if request.session_id not in processors:
-        raise HTTPException(status_code=404, detail="会话不存在，请先上传图片")
-
-    processor = processors[request.session_id]
-
-    try:
-        preview_base64 = processor.get_composite_preview(
-            request.layers,
-            request.selected_layer
-        )
-
-        return {
-            "success": True,
-            "preview": preview_base64,
-            "message": "合成预览生成成功"
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"合成预览失败: {str(e)}")
-
-
 @app.get("/process/sam-status")
-async def sam_status():
+async def get_sam_status():
     """
-    检查 SAM/SAM2 模型状态
+    检查 SAM 模型状态
     """
     if SAM_AVAILABLE:
-        segmenter = get_segmenter("sam2_b")  # 默认使用 SAM 2
+        segmenter = get_segmenter()
         is_ready = segmenter.is_available()
         model_info = segmenter.get_model_info()
         return {
-            "available": SAM_AVAILABLE,
-            "ready": is_ready,
-            "device": model_info.get("device"),
-            "model_type": model_info.get("model_type"),
-            "is_sam2": model_info.get("is_sam2", False),
-            "message": f"{'SAM 2' if model_info.get('is_sam2') else 'SAM 1'} 模型已就绪 ({model_info.get('device', 'unknown')})" if is_ready else "模型正在加载或不可用"
+            "available": is_ready,
+            "model_info": model_info,
+            "message": "SAM 模型已就绪" if is_ready else "SAM 模型加载失败"
         }
     else:
         return {
             "available": False,
-            "ready": False,
-            "device": None,
-            "model_type": None,
-            "is_sam2": False,
-            "message": "SAM 模块未安装，请运行: pip install ultralytics torch"
+            "model_info": {
+                "model_type": "none",
+                "device": "none",
+                "available": False,
+                "is_sam2": False
+            },
+            "message": "SAM 模块未安装"
         }
 
 
@@ -894,7 +595,8 @@ async def extract_from_curve_points(request: ExtractFromCurveRequest):
         # 从骨架点提取数据
         data_points = processor.extract_data_from_curve_points(
             skeleton_points=request.skeleton_points,
-            downsample_factor=request.downsample_factor
+            downsample_factor=request.downsample_factor,
+            smoothness=request.smoothness
         )
 
         if len(data_points) == 0:
