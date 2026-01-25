@@ -57,7 +57,7 @@ const AIRecognitionPanel = ({
   // 编辑状态
   const [editedAxes, setEditedAxes] = useState(null)
 
-  const API_BASE = 'http://localhost:8000'
+  const API_BASE = ''
 
   // AI 识别坐标轴
   const handleRecognizeAxes = async () => {

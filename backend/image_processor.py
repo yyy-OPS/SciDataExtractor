@@ -1,15 +1,29 @@
 """
 图像处理模块 - 核心计算机视觉逻辑
 负责图像加载、颜色分割、曲线提取和坐标转换
+
+增强功能:
+- K-Means 颜色聚类自动分层
+- 动量追踪算法处理曲线交叉
+- 支持 Human-in-the-Loop 分层提取
 """
 
 import cv2
 import numpy as np
 import pandas as pd
-from typing import List, Tuple, Optional
+import base64
+from typing import List, Tuple, Optional, Dict
 from scipy import ndimage
 from scipy.signal import savgol_filter
 from skimage.morphology import skeletonize, thin
+
+# 尝试导入 sklearn，如果不可用则使用备用方案
+try:
+    from sklearn.cluster import KMeans
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    SKLEARN_AVAILABLE = False
+    print("[ImageProcessor] sklearn 未安装，K-Means 功能将使用备用实现")
 
 
 class ImageProcessor:
@@ -390,6 +404,950 @@ class ImageProcessor:
         """将提取的数据导出到 Excel 文件"""
         df = pd.DataFrame(data_points, columns=['X', 'Y'])
         df.to_excel(output_path, index=False, sheet_name='提取数据')
+
+    # ==================== K-Means 颜色聚类方法 ====================
+
+    def detect_dominant_colors(
+        self,
+        k: int = 5,
+        exclude_background: bool = True,
+        min_saturation: int = 30
+    ) -> List[Dict]:
+        """
+        使用 K-Means 算法自动识别图中主要颜色，返回 N 个初始图层
+
+        参数:
+            k: 聚类数量（颜色数量）
+            exclude_background: 是否排除背景色（白色/浅灰色）
+            min_saturation: 最小饱和度阈值，用于过滤背景
+
+        返回:
+            图层列表，每个图层包含:
+            - name: 图层名称
+            - color_hsv: HSV 颜色值
+            - color_rgb: RGB 颜色值
+            - mask: 二值掩码 (Base64 PNG)
+            - pixel_count: 像素数量
+            - percentage: 占比
+        """
+        # 获取图像像素
+        pixels = self.image_hsv.reshape(-1, 3).astype(np.float32)
+
+        # 如果排除背景，过滤低饱和度像素
+        if exclude_background:
+            # 创建掩码：排除低饱和度（背景）和极高/极低明度
+            saturation = pixels[:, 1]
+            value = pixels[:, 2]
+            valid_mask = (saturation >= min_saturation) & (value > 30) & (value < 250)
+            valid_pixels = pixels[valid_mask]
+
+            if len(valid_pixels) < 100:
+                # 如果有效像素太少，使用所有像素
+                valid_pixels = pixels
+                valid_mask = np.ones(len(pixels), dtype=bool)
+        else:
+            valid_pixels = pixels
+            valid_mask = np.ones(len(pixels), dtype=bool)
+
+        # 执行 K-Means 聚类
+        if SKLEARN_AVAILABLE:
+            kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+            kmeans.fit(valid_pixels)
+            centers = kmeans.cluster_centers_
+            labels = kmeans.labels_
+        else:
+            # 备用实现：使用 OpenCV 的 K-Means
+            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.2)
+            _, labels, centers = cv2.kmeans(
+                valid_pixels,
+                k,
+                None,
+                criteria,
+                10,
+                cv2.KMEANS_RANDOM_CENTERS
+            )
+            labels = labels.flatten()
+
+        # 创建完整标签数组
+        full_labels = np.full(len(pixels), -1, dtype=np.int32)
+        full_labels[valid_mask] = labels
+
+        # 为每个聚类创建图层
+        layers = []
+        total_valid_pixels = np.sum(valid_mask)
+
+        # 预定义颜色名称映射
+        color_names = self._get_color_names()
+
+        for i in range(k):
+            center_hsv = centers[i].astype(np.uint8)
+
+            # 创建该颜色的掩码
+            cluster_mask = (full_labels == i).reshape(self.height, self.width)
+            mask_uint8 = (cluster_mask * 255).astype(np.uint8)
+
+            # 形态学操作清理掩码
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            mask_uint8 = cv2.morphologyEx(mask_uint8, cv2.MORPH_OPEN, kernel)
+            mask_uint8 = cv2.morphologyEx(mask_uint8, cv2.MORPH_CLOSE, kernel)
+
+            pixel_count = int(np.sum(mask_uint8 > 0))
+
+            if pixel_count < 50:
+                continue
+
+            # HSV 转 RGB
+            hsv_pixel = np.array([[[center_hsv[0], center_hsv[1], center_hsv[2]]]], dtype=np.uint8)
+            rgb_pixel = cv2.cvtColor(hsv_pixel, cv2.COLOR_HSV2RGB)[0, 0]
+
+            # 获取颜色名称
+            color_name = self._hsv_to_color_name(center_hsv, color_names)
+
+            # 编码掩码为 Base64
+            _, buffer = cv2.imencode('.png', mask_uint8)
+            mask_base64 = base64.b64encode(buffer).decode('utf-8')
+
+            layers.append({
+                "name": f"{color_name}_{i+1}",
+                "color_hsv": center_hsv.tolist(),
+                "color_rgb": rgb_pixel.tolist(),
+                "mask": f"data:image/png;base64,{mask_base64}",
+                "pixel_count": pixel_count,
+                "percentage": round(pixel_count / total_valid_pixels * 100, 2)
+            })
+
+        # 按像素数量排序
+        layers.sort(key=lambda x: x["pixel_count"], reverse=True)
+
+        return layers
+
+    def _get_color_names(self) -> Dict[str, Tuple[int, int, int, int]]:
+        """获取颜色名称映射表 (H_min, H_max, S_min, V_min)"""
+        return {
+            "红色": (0, 10, 100, 100),
+            "红色2": (170, 180, 100, 100),
+            "橙色": (10, 25, 100, 100),
+            "黄色": (25, 35, 100, 100),
+            "绿色": (35, 85, 100, 100),
+            "青色": (85, 100, 100, 100),
+            "蓝色": (100, 130, 100, 100),
+            "紫色": (130, 155, 100, 100),
+            "粉色": (155, 170, 50, 100),
+            "黑色": (0, 180, 0, 0),
+            "白色": (0, 180, 0, 200),
+            "灰色": (0, 180, 0, 50),
+        }
+
+    def _hsv_to_color_name(
+        self,
+        hsv: np.ndarray,
+        color_names: Dict
+    ) -> str:
+        """将 HSV 值转换为颜色名称"""
+        h, s, v = hsv
+
+        # 检查灰度色
+        if s < 30:
+            if v < 50:
+                return "黑色"
+            elif v > 200:
+                return "白色"
+            else:
+                return "灰色"
+
+        # 检查彩色
+        for name, (h_min, h_max, s_min, v_min) in color_names.items():
+            if name in ["黑色", "白色", "灰色"]:
+                continue
+            if h_min <= h <= h_max and s >= s_min and v >= v_min:
+                return name
+
+        return "未知色"
+
+    # ==================== 动量追踪算法 ====================
+
+    def extract_curve_from_mask(
+        self,
+        mask: np.ndarray,
+        start_point: Optional[Tuple[int, int]] = None,
+        direction: str = "auto"
+    ) -> List[Tuple[float, float]]:
+        """
+        从二值 Mask 上使用动量追踪算法提取曲线
+
+        核心算法：从起点开始，沿着线条切线方向搜索下一个像素，
+        利用动量惯性解决交叉点选择问题。
+
+        参数:
+            mask: 二值掩码 (uint8, 0-255)
+            start_point: 起始点 (x, y)，如果为 None 则自动检测
+            direction: 追踪方向 ('left_to_right', 'right_to_left', 'auto')
+
+        返回:
+            物理坐标点列表 [(x1, y1), (x2, y2), ...]
+        """
+        if not self.calibration_set:
+            raise ValueError("请先设置校准参数")
+
+        # 确保掩码是二值的
+        if mask.dtype != np.uint8:
+            mask = mask.astype(np.uint8)
+        binary_mask = (mask > 127).astype(np.uint8)
+
+        # 骨架化
+        skeleton = skeletonize(binary_mask)
+        skeleton_uint8 = (skeleton * 255).astype(np.uint8)
+
+        # 获取所有骨架点
+        y_coords, x_coords = np.where(skeleton_uint8 > 0)
+
+        if len(x_coords) == 0:
+            return []
+
+        # 确定起始点
+        if start_point is None:
+            start_point = self._find_start_point(x_coords, y_coords, direction)
+
+        # 动量追踪
+        traced_points = self._momentum_trace(
+            skeleton_uint8,
+            start_point,
+            x_coords,
+            y_coords
+        )
+
+        # 转换为物理坐标
+        physical_points = []
+        for px, py in traced_points:
+            if self.is_in_plot_region(px, py):
+                phys_x, phys_y = self.pixel_to_physical(px, py)
+                physical_points.append((phys_x, phys_y))
+
+        # 按 X 排序
+        physical_points.sort(key=lambda p: p[0])
+
+        # 去除异常点
+        if len(physical_points) > 5:
+            physical_points = self.remove_outliers(physical_points)
+
+        return physical_points
+
+    def _find_start_point(
+        self,
+        x_coords: np.ndarray,
+        y_coords: np.ndarray,
+        direction: str
+    ) -> Tuple[int, int]:
+        """找到追踪起始点"""
+        if direction == "left_to_right" or direction == "auto":
+            # 找最左边的点
+            min_x_idx = np.argmin(x_coords)
+            return (x_coords[min_x_idx], y_coords[min_x_idx])
+        else:
+            # 找最右边的点
+            max_x_idx = np.argmax(x_coords)
+            return (x_coords[max_x_idx], y_coords[max_x_idx])
+
+    def _momentum_trace(
+        self,
+        skeleton: np.ndarray,
+        start_point: Tuple[int, int],
+        all_x: np.ndarray,
+        all_y: np.ndarray
+    ) -> List[Tuple[int, int]]:
+        """
+        动量追踪算法核心实现
+
+        参数:
+            skeleton: 骨架图像
+            start_point: 起始点
+            all_x, all_y: 所有骨架点坐标
+
+        返回:
+            追踪到的像素坐标列表
+        """
+        h, w = skeleton.shape
+        visited = np.zeros_like(skeleton, dtype=bool)
+        traced = []
+
+        # 8邻域方向向量
+        directions = [
+            (1, 0), (1, 1), (0, 1), (-1, 1),
+            (-1, 0), (-1, -1), (0, -1), (1, -1)
+        ]
+
+        # 初始化
+        current = start_point
+        momentum = np.array([1.0, 0.0])  # 初始动量向右
+        momentum_weight = 0.7  # 动量权重
+
+        max_iterations = len(all_x) * 2
+        iteration = 0
+
+        while iteration < max_iterations:
+            iteration += 1
+            x, y = int(current[0]), int(current[1])
+
+            # 边界检查
+            if x < 0 or x >= w or y < 0 or y >= h:
+                break
+
+            # 标记已访问
+            if visited[y, x]:
+                # 如果已访问，尝试跳过
+                break
+            visited[y, x] = True
+            traced.append((x, y))
+
+            # 寻找下一个点
+            candidates = []
+            for dx, dy in directions:
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < w and 0 <= ny < h:
+                    if skeleton[ny, nx] > 0 and not visited[ny, nx]:
+                        # 计算方向向量
+                        dir_vec = np.array([dx, dy], dtype=np.float64)
+                        dir_vec = dir_vec / (np.linalg.norm(dir_vec) + 1e-10)
+
+                        # 计算与动量的夹角（点积）
+                        momentum_norm = momentum / (np.linalg.norm(momentum) + 1e-10)
+                        angle_score = np.dot(dir_vec, momentum_norm)
+
+                        # 综合评分：动量一致性 + 距离
+                        score = momentum_weight * angle_score + (1 - momentum_weight)
+                        candidates.append((nx, ny, score, dir_vec))
+
+            if not candidates:
+                # 没有候选点，尝试扩大搜索范围
+                found = False
+                for radius in range(2, 5):
+                    for dx in range(-radius, radius + 1):
+                        for dy in range(-radius, radius + 1):
+                            if dx == 0 and dy == 0:
+                                continue
+                            nx, ny = x + dx, y + dy
+                            if 0 <= nx < w and 0 <= ny < h:
+                                if skeleton[ny, nx] > 0 and not visited[ny, nx]:
+                                    dir_vec = np.array([dx, dy], dtype=np.float64)
+                                    dir_vec = dir_vec / (np.linalg.norm(dir_vec) + 1e-10)
+                                    candidates.append((nx, ny, 0.5, dir_vec))
+                                    found = True
+                    if found:
+                        break
+                if not candidates:
+                    break
+
+            # 选择最佳候选点
+            candidates.sort(key=lambda c: c[2], reverse=True)
+            best = candidates[0]
+            next_x, next_y, _, next_dir = best
+
+            # 更新动量（指数移动平均）
+            momentum = 0.6 * momentum + 0.4 * next_dir
+
+            current = (next_x, next_y)
+
+        return traced
+
+    def create_mask_from_color(
+        self,
+        target_hsv: List[int],
+        tolerance: int = 20
+    ) -> np.ndarray:
+        """
+        根据颜色创建掩码
+
+        参数:
+            target_hsv: 目标 HSV 颜色
+            tolerance: 颜色容差
+
+        返回:
+            二值掩码 (uint8, 0-255)
+        """
+        h, s, v = target_hsv
+
+        # 判断是否为灰度色
+        is_grayscale = s < 30
+
+        if is_grayscale:
+            lower = np.array([0, 0, max(0, v - tolerance)])
+            upper = np.array([179, 100, min(255, v + tolerance)])
+        else:
+            h_tol = min(tolerance, 15)
+            s_tol = tolerance + 10
+            v_tol = tolerance + 20
+
+            lower = np.array([
+                max(0, h - h_tol),
+                max(30, s - s_tol),
+                max(30, v - v_tol)
+            ])
+            upper = np.array([
+                min(179, h + h_tol),
+                min(255, s + s_tol),
+                min(255, v + v_tol)
+            ])
+
+        mask = cv2.inRange(self.image_hsv, lower, upper)
+
+        # 形态学清理
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=2)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+        return mask
+
+    def refine_mask_with_morphology(
+        self,
+        mask: np.ndarray,
+        operation: str = "clean",
+        kernel_size: int = 3
+    ) -> np.ndarray:
+        """
+        使用形态学操作优化掩码
+
+        参数:
+            mask: 输入掩码
+            operation: 操作类型 ('clean', 'dilate', 'erode', 'fill_gaps')
+            kernel_size: 核大小
+
+        返回:
+            优化后的掩码
+        """
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+
+        if operation == "clean":
+            # 清理噪点
+            result = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+            result = cv2.morphologyEx(result, cv2.MORPH_CLOSE, kernel)
+        elif operation == "dilate":
+            # 膨胀
+            result = cv2.dilate(mask, kernel, iterations=1)
+        elif operation == "erode":
+            # 腐蚀
+            result = cv2.erode(mask, kernel, iterations=1)
+        elif operation == "fill_gaps":
+            # 填充间隙
+            result = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+        else:
+            result = mask
+
+        return result
+
+    def merge_masks(
+        self,
+        mask1: np.ndarray,
+        mask2: np.ndarray,
+        operation: str = "union"
+    ) -> np.ndarray:
+        """
+        合并两个掩码
+
+        参数:
+            mask1, mask2: 输入掩码
+            operation: 合并操作 ('union', 'intersect', 'subtract')
+
+        返回:
+            合并后的掩码
+        """
+        if operation == "union":
+            return cv2.bitwise_or(mask1, mask2)
+        elif operation == "intersect":
+            return cv2.bitwise_and(mask1, mask2)
+        elif operation == "subtract":
+            return cv2.bitwise_and(mask1, cv2.bitwise_not(mask2))
+        else:
+            return mask1
+
+    def mask_to_base64(self, mask: np.ndarray) -> str:
+        """将掩码转换为 Base64 PNG"""
+        _, buffer = cv2.imencode('.png', mask)
+        base64_str = base64.b64encode(buffer).decode('utf-8')
+        return f"data:image/png;base64,{base64_str}"
+
+    def base64_to_mask(self, base64_data: str) -> np.ndarray:
+        """从 Base64 PNG 解码掩码"""
+        if base64_data.startswith('data:'):
+            base64_data = base64_data.split(',')[1]
+
+        img_data = base64.b64decode(base64_data)
+        nparr = np.frombuffer(img_data, np.uint8)
+        mask = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
+
+        # 确保尺寸匹配
+        if mask.shape[:2] != (self.height, self.width):
+            mask = cv2.resize(mask, (self.width, self.height))
+
+        return mask
+
+    def get_composite_preview(
+        self,
+        layers: List[Dict],
+        selected_layer: Optional[str] = None
+    ) -> str:
+        """
+        生成图层合成预览图
+
+        参数:
+            layers: 图层列表，每个包含 mask (base64) 和 color_rgb
+            selected_layer: 当前选中的图层名称
+
+        返回:
+            合成图像的 Base64 PNG
+        """
+        result = self.image_rgb.copy()
+
+        for layer in layers:
+            if not layer.get("visible", True):
+                continue
+
+            mask = self.base64_to_mask(layer["mask"])
+            color = layer.get("color_rgb", [255, 0, 0])
+            opacity = layer.get("opacity", 0.5)
+
+            # 如果是选中图层，增加不透明度
+            if layer.get("name") == selected_layer:
+                opacity = min(1.0, opacity + 0.2)
+
+            # 创建彩色覆盖层
+            overlay = np.zeros_like(result)
+            overlay[mask > 127] = color
+
+            # 混合
+            mask_3ch = np.stack([mask, mask, mask], axis=-1) / 255.0
+            result = (result * (1 - mask_3ch * opacity) +
+                     overlay * mask_3ch * opacity).astype(np.uint8)
+
+        # 编码为 Base64
+        _, buffer = cv2.imencode('.png', cv2.cvtColor(result, cv2.COLOR_RGB2BGR))
+        base64_str = base64.b64encode(buffer).decode('utf-8')
+        return f"data:image/png;base64,{base64_str}"
+
+    # ==================== 轮廓提取和高亮显示 ====================
+
+    def detect_curves_with_contours(
+        self,
+        k: int = 5,
+        min_saturation: int = 30,
+        min_contour_length: int = 50
+    ) -> Dict:
+        """
+        检测图像中的曲线并提取轮廓线
+
+        核心算法：
+        1. K-Means 颜色聚类识别主要颜色
+        2. 对每个颜色进行边缘检测和骨架化
+        3. 提取轮廓线坐标（用于前端绘制）
+        4. 生成带轮廓高亮的预览图
+
+        参数:
+            k: 聚类数量
+            min_saturation: 最小饱和度阈值
+            min_contour_length: 最小轮廓长度（过滤噪点）
+
+        返回:
+            {
+                "curves": [
+                    {
+                        "id": str,
+                        "name": str,
+                        "color_rgb": [r, g, b],
+                        "color_hsv": [h, s, v],
+                        "contour_points": [[x1,y1], [x2,y2], ...],  # 轮廓点坐标
+                        "skeleton_points": [[x1,y1], [x2,y2], ...], # 骨架点坐标
+                        "mask_base64": str,
+                        "pixel_count": int
+                    },
+                    ...
+                ],
+                "preview_image": str (base64),
+                "original_with_overlay": str (base64)
+            }
+        """
+        # 获取图像像素
+        pixels = self.image_hsv.reshape(-1, 3).astype(np.float32)
+
+        # 过滤背景像素
+        saturation = pixels[:, 1]
+        value = pixels[:, 2]
+        valid_mask = (saturation >= min_saturation) & (value > 30) & (value < 250)
+        valid_pixels = pixels[valid_mask]
+
+        if len(valid_pixels) < 100:
+            valid_pixels = pixels
+            valid_mask = np.ones(len(pixels), dtype=bool)
+
+        # K-Means 聚类
+        if SKLEARN_AVAILABLE:
+            kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+            kmeans.fit(valid_pixels)
+            centers = kmeans.cluster_centers_
+            labels = kmeans.labels_
+        else:
+            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.2)
+            _, labels, centers = cv2.kmeans(
+                valid_pixels, k, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS
+            )
+            labels = labels.flatten()
+
+        # 创建完整标签数组
+        full_labels = np.full(len(pixels), -1, dtype=np.int32)
+        full_labels[valid_mask] = labels
+
+        # 预定义颜色
+        highlight_colors = [
+            (255, 0, 0),    # 红
+            (0, 0, 255),    # 蓝
+            (0, 255, 0),    # 绿
+            (255, 165, 0),  # 橙
+            (128, 0, 128),  # 紫
+            (255, 255, 0),  # 黄
+            (0, 255, 255),  # 青
+            (255, 0, 255),  # 品红
+        ]
+
+        curves = []
+        color_names = self._get_color_names()
+
+        # 创建预览图像
+        preview_image = self.image_rgb.copy()
+        overlay_image = self.image_rgb.copy()
+
+        for i in range(k):
+            center_hsv = centers[i].astype(np.uint8)
+
+            # 创建该颜色的掩码
+            cluster_mask = (full_labels == i).reshape(self.height, self.width)
+            mask_uint8 = (cluster_mask * 255).astype(np.uint8)
+
+            # 形态学清理
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            mask_uint8 = cv2.morphologyEx(mask_uint8, cv2.MORPH_OPEN, kernel)
+            mask_uint8 = cv2.morphologyEx(mask_uint8, cv2.MORPH_CLOSE, kernel)
+
+            pixel_count = int(np.sum(mask_uint8 > 0))
+            if pixel_count < 50:
+                continue
+
+            # 提取轮廓
+            contours, _ = cv2.findContours(
+                mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+
+            # 过滤小轮廓并合并点
+            contour_points = []
+            for contour in contours:
+                if cv2.arcLength(contour, False) >= min_contour_length:
+                    # 简化轮廓
+                    epsilon = 0.002 * cv2.arcLength(contour, True)
+                    approx = cv2.approxPolyDP(contour, epsilon, False)
+                    for point in approx:
+                        contour_points.append([int(point[0][0]), int(point[0][1])])
+
+            # 骨架化提取中心线
+            skeleton = skeletonize(mask_uint8 > 0)
+            skeleton_uint8 = (skeleton * 255).astype(np.uint8)
+            y_coords, x_coords = np.where(skeleton_uint8 > 0)
+
+            # 对骨架点进行排序（从左到右）
+            if len(x_coords) > 0:
+                sorted_indices = np.argsort(x_coords)
+                skeleton_points = [
+                    [int(x_coords[idx]), int(y_coords[idx])]
+                    for idx in sorted_indices[::max(1, len(sorted_indices) // 500)]  # 降采样
+                ]
+            else:
+                skeleton_points = []
+
+            # HSV 转 RGB
+            hsv_pixel = np.array([[[center_hsv[0], center_hsv[1], center_hsv[2]]]], dtype=np.uint8)
+            rgb_pixel = cv2.cvtColor(hsv_pixel, cv2.COLOR_HSV2RGB)[0, 0]
+
+            # 获取颜色名称
+            color_name = self._hsv_to_color_name(center_hsv, color_names)
+
+            # 选择高亮颜色
+            highlight_color = highlight_colors[i % len(highlight_colors)]
+
+            # 在预览图上绘制轮廓
+            cv2.drawContours(preview_image, contours, -1, highlight_color, 2)
+
+            # 在叠加图上绘制骨架线
+            for j in range(len(skeleton_points) - 1):
+                pt1 = tuple(skeleton_points[j])
+                pt2 = tuple(skeleton_points[j + 1])
+                cv2.line(overlay_image, pt1, pt2, highlight_color, 2)
+
+            # 编码掩码
+            _, buffer = cv2.imencode('.png', mask_uint8)
+            mask_base64 = base64.b64encode(buffer).decode('utf-8')
+
+            curves.append({
+                "id": f"curve_{i}",
+                "name": f"{color_name}_{i+1}",
+                "color_rgb": rgb_pixel.tolist(),
+                "color_hsv": center_hsv.tolist(),
+                "highlight_color": list(highlight_color),
+                "contour_points": contour_points,
+                "skeleton_points": skeleton_points,
+                "mask_base64": f"data:image/png;base64,{mask_base64}",
+                "pixel_count": pixel_count,
+                "visible": True,
+                "editable": True
+            })
+
+        # 按像素数量排序
+        curves.sort(key=lambda x: x["pixel_count"], reverse=True)
+
+        # 编码预览图像
+        _, preview_buffer = cv2.imencode('.png', cv2.cvtColor(preview_image, cv2.COLOR_RGB2BGR))
+        preview_base64 = base64.b64encode(preview_buffer).decode('utf-8')
+
+        _, overlay_buffer = cv2.imencode('.png', cv2.cvtColor(overlay_image, cv2.COLOR_RGB2BGR))
+        overlay_base64 = base64.b64encode(overlay_buffer).decode('utf-8')
+
+        return {
+            "curves": curves,
+            "preview_image": f"data:image/png;base64,{preview_base64}",
+            "original_with_overlay": f"data:image/png;base64,{overlay_base64}",
+            "count": len(curves)
+        }
+
+    def generate_curve_overlay(
+        self,
+        curves: List[Dict],
+        selected_curve_id: Optional[str] = None,
+        show_skeleton: bool = True,
+        show_contour: bool = False,
+        line_width: int = 2
+    ) -> str:
+        """
+        生成带有曲线轮廓高亮的叠加图像
+
+        参数:
+            curves: 曲线列表（包含 skeleton_points 或 contour_points）
+            selected_curve_id: 当前选中的曲线 ID（高亮显示）
+            show_skeleton: 是否显示骨架线
+            show_contour: 是否显示轮廓
+            line_width: 线宽
+
+        返回:
+            Base64 编码的 PNG 图像
+        """
+        result = self.image_rgb.copy()
+
+        for curve in curves:
+            if not curve.get("visible", True):
+                continue
+
+            color = tuple(curve.get("highlight_color", curve.get("color_rgb", [255, 0, 0])))
+            is_selected = curve.get("id") == selected_curve_id
+
+            # 选中的曲线使用更粗的线
+            width = line_width + 2 if is_selected else line_width
+            alpha = 1.0 if is_selected else 0.7
+
+            if show_skeleton and "skeleton_points" in curve:
+                points = curve["skeleton_points"]
+                if len(points) > 1:
+                    # 绘制骨架线
+                    for j in range(len(points) - 1):
+                        pt1 = tuple(points[j])
+                        pt2 = tuple(points[j + 1])
+                        cv2.line(result, pt1, pt2, color, width)
+
+            if show_contour and "contour_points" in curve:
+                points = curve["contour_points"]
+                if len(points) > 1:
+                    pts = np.array(points, dtype=np.int32).reshape((-1, 1, 2))
+                    cv2.polylines(result, [pts], False, color, width)
+
+            # 如果是选中的曲线，添加发光效果
+            if is_selected and "skeleton_points" in curve:
+                points = curve["skeleton_points"]
+                if len(points) > 1:
+                    # 绘制外发光
+                    for j in range(len(points) - 1):
+                        pt1 = tuple(points[j])
+                        pt2 = tuple(points[j + 1])
+                        cv2.line(result, pt1, pt2, (255, 255, 255), width + 4)
+                    # 再绘制主线
+                    for j in range(len(points) - 1):
+                        pt1 = tuple(points[j])
+                        pt2 = tuple(points[j + 1])
+                        cv2.line(result, pt1, pt2, color, width)
+
+        # 编码为 Base64
+        _, buffer = cv2.imencode('.png', cv2.cvtColor(result, cv2.COLOR_RGB2BGR))
+        base64_str = base64.b64encode(buffer).decode('utf-8')
+        return f"data:image/png;base64,{base64_str}"
+
+    def update_curve_from_edited_points(
+        self,
+        curve_id: str,
+        edited_points: List[List[int]],
+        original_mask_base64: str
+    ) -> Dict:
+        """
+        根据用户编辑的点更新曲线掩码
+
+        参数:
+            curve_id: 曲线 ID
+            edited_points: 用户编辑后的点列表 [[x1,y1], [x2,y2], ...]
+            original_mask_base64: 原始掩码
+
+        返回:
+            更新后的曲线数据
+        """
+        # 解码原始掩码
+        original_mask = self.base64_to_mask(original_mask_base64)
+
+        # 创建新掩码
+        new_mask = np.zeros_like(original_mask)
+
+        # 将编辑的点绘制到掩码上
+        if len(edited_points) > 1:
+            pts = np.array(edited_points, dtype=np.int32)
+            # 绘制线条（带一定宽度）
+            cv2.polylines(new_mask, [pts], False, 255, 3)
+
+            # 膨胀以创建区域
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            new_mask = cv2.dilate(new_mask, kernel, iterations=1)
+
+        # 与原始掩码合并（保留用户编辑的部分）
+        combined_mask = cv2.bitwise_or(original_mask, new_mask)
+
+        # 重新提取骨架
+        skeleton = skeletonize(combined_mask > 0)
+        y_coords, x_coords = np.where(skeleton)
+
+        if len(x_coords) > 0:
+            sorted_indices = np.argsort(x_coords)
+            skeleton_points = [
+                [int(x_coords[idx]), int(y_coords[idx])]
+                for idx in sorted_indices[::max(1, len(sorted_indices) // 500)]
+            ]
+        else:
+            skeleton_points = edited_points
+
+        # 编码新掩码
+        _, buffer = cv2.imencode('.png', combined_mask)
+        mask_base64 = base64.b64encode(buffer).decode('utf-8')
+
+        return {
+            "id": curve_id,
+            "mask_base64": f"data:image/png;base64,{mask_base64}",
+            "skeleton_points": skeleton_points,
+            "pixel_count": int(np.sum(combined_mask > 0))
+        }
+
+    def extract_data_from_curve_points(
+        self,
+        skeleton_points: List[List[int]],
+        downsample_factor: int = 1,
+        smoothness: int = 0
+    ) -> List[Tuple[float, float]]:
+        """
+        从曲线骨架点提取物理坐标数据
+
+        参数:
+            skeleton_points: 骨架点列表 [[x1,y1], [x2,y2], ...]
+            downsample_factor: 降采样因子
+            smoothness: 平滑度 (0-10)，0 表示不平滑
+
+        返回:
+            物理坐标点列表 [(x1, y1), (x2, y2), ...]
+        """
+        if not self.calibration_set:
+            raise ValueError("请先设置校准参数")
+
+        physical_points = []
+
+        for i, (px, py) in enumerate(skeleton_points):
+            if i % downsample_factor != 0:
+                continue
+
+            if self.is_in_plot_region(px, py):
+                phys_x, phys_y = self.pixel_to_physical(px, py)
+                physical_points.append((phys_x, phys_y))
+
+        # 按 X 排序
+        physical_points.sort(key=lambda p: p[0])
+
+        # 去除重复的 X 值（取平均 Y）
+        if len(physical_points) > 0:
+            physical_points = self._merge_duplicate_x(physical_points)
+
+        # 应用平滑
+        if smoothness > 0 and len(physical_points) > 2:
+            physical_points = self._apply_smoothing(physical_points, smoothness)
+
+        return physical_points
+
+    def _merge_duplicate_x(
+        self,
+        points: List[Tuple[float, float]],
+        tolerance: float = 1e-6
+    ) -> List[Tuple[float, float]]:
+        """合并相同 X 值的点（取 Y 平均值）"""
+        if len(points) == 0:
+            return points
+
+        merged = []
+        current_x = points[0][0]
+        y_values = [points[0][1]]
+
+        for x, y in points[1:]:
+            if abs(x - current_x) < tolerance:
+                y_values.append(y)
+            else:
+                merged.append((current_x, np.median(y_values)))
+                current_x = x
+                y_values = [y]
+
+        merged.append((current_x, np.median(y_values)))
+        return merged
+
+    def _apply_smoothing(
+        self,
+        points: List[Tuple[float, float]],
+        smoothness: int
+    ) -> List[Tuple[float, float]]:
+        """
+        对数据点应用平滑处理
+
+        参数:
+            points: 数据点列表 [(x1, y1), (x2, y2), ...]
+            smoothness: 平滑度 (1-10)
+
+        返回:
+            平滑后的数据点列表
+        """
+        if len(points) < 3 or smoothness <= 0:
+            return points
+
+        # 将平滑度映射到窗口大小 (3-21，必须是奇数)
+        window_size = min(2 * smoothness + 1, len(points))
+        if window_size % 2 == 0:
+            window_size -= 1
+
+        # 提取 X 和 Y 值
+        x_values = np.array([p[0] for p in points])
+        y_values = np.array([p[1] for p in points])
+
+        # 使用移动平均平滑 Y 值
+        smoothed_y = np.convolve(y_values, np.ones(window_size) / window_size, mode='same')
+
+        # 边界处理：使用原始值
+        half_window = window_size // 2
+        smoothed_y[:half_window] = y_values[:half_window]
+        smoothed_y[-half_window:] = y_values[-half_window:]
+
+        # 重新组合
+        smoothed_points = [(float(x), float(y)) for x, y in zip(x_values, smoothed_y)]
+
+        return smoothed_points
 
 
 # ==================== 测试代码 ====================

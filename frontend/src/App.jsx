@@ -3,15 +3,20 @@ import ImageCanvas from './components/ImageCanvas'
 import ControlPanel from './components/ControlPanel'
 import AIConfigHeader from './components/AIConfigHeader'
 import DataPreview from './components/DataPreview'
+import LayerEditor from './components/LayerEditor'
+import OriginPlotPanel from './components/OriginPlotPanel'
 import './App.css'
 
-const API_BASE = 'http://localhost:8000'
+const API_BASE = ''
 
 function App() {
   // ========== 状态管理 ==========
   const [sessionId, setSessionId] = useState(null)
   const [uploadedImage, setUploadedImage] = useState(null)
   const [currentStep, setCurrentStep] = useState(1) // 1: 上传, 2: 校准, 3: 采样, 3.5: 框选范围, 4: 提取
+
+  // Origin绘图面板状态
+  const [showOriginPanel, setShowOriginPanel] = useState(false)
 
   // 校准数据
   const [calibrationPoints, setCalibrationPoints] = useState({
@@ -54,6 +59,10 @@ function App() {
   // 手动绘制模式
   const [isManualDrawMode, setIsManualDrawMode] = useState(false)
   const [smoothness, setSmoothness] = useState(0.5) // 平滑度 0-1
+
+  // 图层编辑模式
+  const [useLayerEditor, setUseLayerEditor] = useState(false) // 是否使用图层编辑器
+  const [selectedLayer, setSelectedLayer] = useState(null) // 当前选中的图层
 
   // 保存历史记录
   const saveHistory = useCallback((newData, action = '') => {
@@ -589,6 +598,29 @@ function App() {
     setMessage(isManualDrawMode ? '已退出手动绘制模式' : '已进入手动绘制模式，单击添加单点，长按拖动绘制路径')
   }
 
+  // ========== 图层编辑相关函数 ==========
+
+  // 切换图层编辑模式
+  const handleToggleLayerEditor = () => {
+    setUseLayerEditor(!useLayerEditor)
+    setMessage(useLayerEditor ? '已切换到传统模式' : '已切换到图层编辑模式')
+  }
+
+  // 图层选择回调
+  const handleLayerSelect = (layer) => {
+    setSelectedLayer(layer)
+    setMessage(`已选择图层: ${layer.name}`)
+  }
+
+  // 从图层提取数据回调
+  const handleExtractFromLayer = (data, layer) => {
+    setExtractedData(data)
+    saveHistory(data, `从图层 "${layer.name}" 提取数据`)
+    setRepairedData([])
+    setMessage(`成功从图层 "${layer.name}" 提取 ${data.length} 个数据点`)
+    setShowPreview(true)
+  }
+
   // 处理区域选择（用于AI处理）
   const handleSelectRegion = (selectedPoints, bounds) => {
     setSelectedRegion({
@@ -799,14 +831,53 @@ function App() {
 
   return (
     <div className="min-h-screen bg-gray-100">
+      {/* Origin绘图面板 - 模态显示 */}
+      {showOriginPanel && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="relative w-full max-w-6xl my-8">
+            <button
+              onClick={() => setShowOriginPanel(false)}
+              className="absolute -top-12 right-0 text-white hover:text-gray-200 transition"
+            >
+              <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+            <OriginPlotPanel
+              extractedData={extractedData.length > 0 ? extractedData : null}
+              onClose={() => setShowOriginPanel(false)}
+            />
+          </div>
+        </div>
+      )}
+
       {/* 标题栏 */}
       <header className="bg-blue-600 text-white py-4 shadow-lg">
         <div className="container mx-auto px-4 flex justify-between items-center">
           <div>
             <h1 className="text-3xl font-bold">SciDataExtractor</h1>
-            <p className="text-blue-100 mt-1">科学图表数据提取工具</p>
+            <p className="text-blue-100 mt-1">科学图表数据提取工具 - 支持图层编辑</p>
           </div>
           <div className="flex items-center gap-4">
+            {/* Origin绘图按钮 */}
+            <button
+              onClick={() => setShowOriginPanel(true)}
+              className="px-4 py-2 bg-gradient-to-r from-orange-500 to-amber-500 text-white rounded-lg hover:from-orange-600 hover:to-amber-600 transition font-medium flex items-center gap-2"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+              </svg>
+              Origin绘图
+            </button>
+            {/* 模式切换按钮 */}
+            {uploadedImage && (
+              <button
+                onClick={handleToggleLayerEditor}
+                className="px-4 py-2 bg-white text-blue-600 rounded-lg hover:bg-blue-50 transition font-medium"
+              >
+                {useLayerEditor ? '📐 传统模式' : '🎨 图层编辑模式'}
+              </button>
+            )}
             {/* AI 配置按钮 */}
             <AIConfigHeader
               aiAvailable={aiAvailable}
@@ -832,26 +903,41 @@ function App() {
 
         {/* 主布局 */}
         <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-          {/* 左侧：图像画布 */}
+          {/* 左侧：图像画布或图层编辑器 */}
           <div className="xl:col-span-2 bg-white rounded-lg shadow-lg p-6">
-            <h2 className="text-xl font-semibold mb-4">图像区域</h2>
-            <ImageCanvas
-              image={uploadedImage}
-              currentStep={currentStep}
-              calibrationPoints={calibrationPoints}
-              onCalibrationComplete={handleCalibrationComplete}
-              onColorSample={handleColorSample}
-              extractedData={extractedData}
-              aiSuggestedValues={null}
-              onDeletePoints={handleDeletePoints}
-              onAddManualPoints={handleAddManualPoints}
-              extractRegion={extractRegion}
-              onSetExtractRegion={setExtractRegion}
-              isManualDrawMode={isManualDrawMode}
-              smoothness={smoothness}
-              pointSpacing={pointSpacing}
-              pointDensity={pointDensity}
-            />
+            <h2 className="text-xl font-semibold mb-4">
+              {useLayerEditor ? '图层编辑器' : '图像区域'}
+            </h2>
+
+            {useLayerEditor ? (
+              /* 图层编辑模式 */
+              <LayerEditor
+                sessionId={sessionId}
+                imageUrl={uploadedImage}
+                calibrationPoints={calibrationPoints}
+                onLayerSelect={handleLayerSelect}
+                onExtractFromLayer={handleExtractFromLayer}
+              />
+            ) : (
+              /* 传统模式 */
+              <ImageCanvas
+                image={uploadedImage}
+                currentStep={currentStep}
+                calibrationPoints={calibrationPoints}
+                onCalibrationComplete={handleCalibrationComplete}
+                onColorSample={handleColorSample}
+                extractedData={extractedData}
+                aiSuggestedValues={null}
+                onDeletePoints={handleDeletePoints}
+                onAddManualPoints={handleAddManualPoints}
+                extractRegion={extractRegion}
+                onSetExtractRegion={setExtractRegion}
+                isManualDrawMode={isManualDrawMode}
+                smoothness={smoothness}
+                pointSpacing={pointSpacing}
+                pointDensity={pointDensity}
+              />
+            )}
           </div>
 
           {/* 右侧：控制面板 */}
