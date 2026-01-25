@@ -11,17 +11,9 @@ pydantic==2.5.3
 openai==1.12.0
 httpx==0.26.0
 python-dotenv==1.0.0
-
-# K-Means 颜色聚类依赖
-scikit-learn            # 用于 K-Means 颜色聚类
-
-# PyTorch (CPU 版本，避免 CUDA DLL 问题)
+scikit-learn
 torch==2.1.0
 torchvision==0.16.0
-
-# SAM 模型
-ultralytics>=8.2.0      # 用于 SAM
-
-# Origin 绘图依赖
-originpro>=1.0.0        # Origin Python API (需要 Origin 2021+, 仅Windows)
+ultralytics>=8.2.0
+originpro>=1.0.0
 

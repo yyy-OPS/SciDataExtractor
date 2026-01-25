@@ -39,7 +39,7 @@ const AIConfigHeader = ({
     setTestMessage('正在测试连接...')
 
     try {
-      const response = await fetch('http://localhost:8000/ai/test', {
+      const response = await fetch('/ai/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

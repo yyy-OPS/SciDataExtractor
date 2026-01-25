@@ -8,6 +8,7 @@ env/
 venv/
 ENV/
 .venv
+build_env/
 *.egg-info/
 dist/
 build/
@@ -37,3 +38,7 @@ Thumbs.db
 
 # Build output
 frontend/dist/
+
+# App Data
+backend/uploads/
+backend/outputs/

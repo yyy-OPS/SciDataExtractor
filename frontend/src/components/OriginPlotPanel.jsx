@@ -1,19 +1,12 @@
 /**
- * Origin绘图面板组件
- *
- * 功能:
- * - 2D图表绘制 (折线图、散点图、柱状图等)
- * - 3D图表绘制 (曲面图、等高线图、热图等)
- * - 多层图表绘制
- * - 图表样式自定义
- * - 使用提取的数据绘图
- * - 导出多种格式
+ * Origin绘图面板组件 - 简化版
+ * 专注于使用从图表中提取的数据进行绘图
  */
 
 import { useState, useEffect } from 'react'
 import axios from 'axios'
 
-const API_BASE = 'http://localhost:8000'
+const API_BASE = ''
 
 const OriginPlotPanel = ({ extractedData = null, onClose = null }) => {
   // ==================== 状态管理 ====================
@@ -25,66 +18,40 @@ const OriginPlotPanel = ({ extractedData = null, onClose = null }) => {
     message: ''
   })
 
-  // 当前激活的标签页
-  const [activeTab, setActiveTab] = useState('quick') // quick, advanced, xyz, multi, extracted
-
   // 绘图结果
   const [plotResult, setPlotResult] = useState(null)
   const [isPlotting, setIsPlotting] = useState(false)
 
-  // 快速绘图表单
-  const [quickForm, setQuickForm] = useState({
-    xData: '1,2,3,4,5,6,7,8,9,10',
-    yData: '23,45,78,133,178,199,234,278,341,400',
-    plotType: 'line',
-    title: 'My Plot',
-    xTitle: 'X Axis',
-    yTitle: 'Y Axis'
-  })
-
-  // 高级设置
-  const [advancedSettings, setAdvancedSettings] = useState({
+  // 绘图配置
+  const [config, setConfig] = useState({
+    filename: '',                 // 自定义文件名（不含扩展名）
+    plotType: 'line',        // line, scatter, line_symbol
+    title: '从图表提取的数据',
+    xTitle: 'X',
+    yTitle: 'Y',
+    exportFormat: 'png',     // png, pdf, svg, emf, eps
     width: 800,
     height: 600,
-    exportFormat: 'png',
+    showOrigin: false,        // 是否显示Origin窗口
     showGrid: true,
     showLegend: true,
+    legendPosition: 'top-right',
+    color: '#1f77b4',         // 线条颜色
+    lineWidth: 1.5,           // 线宽
+    antiAlias: true,          // 抗锯齿
+    // 高级选项
     xMin: '',
     xMax: '',
     yMin: '',
     yMax: '',
-    color: '#1f77b4',
-    template: ''
+    titleFont: '',
+    titleFontSize: 0,
+    titleColor: '',
+    xTitleFont: '',
+    yTitleFont: '',
+    template: '',              // Origin模板路径
+    customLabTalk: ''          // 自定义LabTalk代码
   })
-
-  // XYZ绘图表单
-  const [xyzForm, setXyzForm] = useState({
-    xData: '',
-    yData: '',
-    zData: '',
-    plotType: 'surface_colormap',
-    title: '3D Surface Plot',
-    colormap: 'Maple.pal'
-  })
-
-  // 多层绘图表单
-  const [multiDatasets, setMultiDatasets] = useState([
-    { name: 'Dataset 1', xData: '1,2,3,4,5', yData: '10,20,15,25,30' },
-    { name: 'Dataset 2', xData: '1,2,3,4,5', yData: '15,25,20,30,35' }
-  ])
-
-  // 使用提取数据的配置
-  const [extractedConfig, setExtractedConfig] = useState({
-    plotType: 'line',
-    title: '从图表提取的数据',
-    exportFormat: 'png',
-    width: 800,
-    height: 600
-  })
-
-  // LabTalk命令
-  const [labtalkCommand, setLabtalkCommand] = useState('')
-  const [labtalkResult, setLabtalkResult] = useState(null)
 
   // ==================== 副作用 ====================
 
@@ -107,118 +74,6 @@ const OriginPlotPanel = ({ extractedData = null, onClose = null }) => {
     }
   }
 
-  const plotQuick = async () => {
-    setIsPlotting(true)
-    setPlotResult(null)
-
-    try {
-      const xData = parseData(quickForm.xData)
-      const yData = parseData(quickForm.yData)
-
-      if (xData.length === 0 || yData.length === 0) {
-        setPlotResult({ success: false, message: '数据格式错误，请输入逗号分隔的数值' })
-        setIsPlotting(false)
-        return
-      }
-
-      const res = await axios.post(`${API_BASE}/origin/plot`, {
-        x_data: xData,
-        y_data: yData,
-        x_name: quickForm.xTitle,
-        y_names: quickForm.yTitle,
-        graph_type: quickForm.plotType,
-        title: quickForm.title,
-        x_title: quickForm.xTitle,
-        y_title: quickForm.yTitle,
-        width: advancedSettings.width,
-        height: advancedSettings.height,
-        export_format: advancedSettings.exportFormat,
-        show_grid: advancedSettings.showGrid,
-        show_legend: advancedSettings.showLegend,
-        color: advancedSettings.color,
-        x_min: advancedSettings.xMin ? parseFloat(advancedSettings.xMin) : null,
-        x_max: advancedSettings.xMax ? parseFloat(advancedSettings.xMax) : null,
-        y_min: advancedSettings.yMin ? parseFloat(advancedSettings.yMin) : null,
-        y_max: advancedSettings.yMax ? parseFloat(advancedSettings.yMax) : null,
-        template: advancedSettings.template
-      })
-
-      setPlotResult(res.data)
-    } catch (err) {
-      setPlotResult({
-        success: false,
-        message: err.response?.data?.detail || err.message || '绘图失败'
-      })
-    } finally {
-      setIsPlotting(false)
-    }
-  }
-
-  const plotXYZ = async () => {
-    setIsPlotting(true)
-    setPlotResult(null)
-
-    try {
-      const xData = parseData(xyzForm.xData)
-      const yData = parseData(xyzForm.yData)
-      const zData = parseData(xyzForm.zData)
-
-      if (xData.length === 0 || yData.length === 0 || zData.length === 0) {
-        setPlotResult({ success: false, message: '数据格式错误' })
-        setIsPlotting(false)
-        return
-      }
-
-      const res = await axios.post(`${API_BASE}/origin/plot-xyz`, {
-        x_data: xData,
-        y_data: yData,
-        z_data: zData,
-        graph_type: xyzForm.plotType,
-        title: xyzForm.title,
-        width: advancedSettings.width,
-        height: advancedSettings.height,
-        export_format: advancedSettings.exportFormat,
-        colormap: xyzForm.colormap
-      })
-
-      setPlotResult(res.data)
-    } catch (err) {
-      setPlotResult({
-        success: false,
-        message: err.response?.data?.detail || err.message || '绘图失败'
-      })
-    } finally {
-      setIsPlotting(false)
-    }
-  }
-
-  const plotMulti = async () => {
-    setIsPlotting(true)
-    setPlotResult(null)
-
-    try {
-      const datasets = multiDatasets.map(ds => ({
-        x_data: parseData(ds.xData),
-        y_data: parseData(ds.yData)
-      }))
-
-      const res = await axios.post(`${API_BASE}/origin/plot-multi`, {
-        datasets,
-        template: 'PAN2VERT',
-        export_format: advancedSettings.exportFormat
-      })
-
-      setPlotResult(res.data)
-    } catch (err) {
-      setPlotResult({
-        success: false,
-        message: err.response?.data?.detail || err.message || '绘图失败'
-      })
-    } finally {
-      setIsPlotting(false)
-    }
-  }
-
   const plotFromExtracted = async () => {
     if (!extractedData || extractedData.length === 0) {
       setPlotResult({ success: false, message: '没有提取的数据可绘制' })
@@ -229,9 +84,55 @@ const OriginPlotPanel = ({ extractedData = null, onClose = null }) => {
     setPlotResult(null)
 
     try {
+      // 构建配置对象
+      const requestConfig = {
+        graph_type: config.plotType,
+        title: config.title,
+        x_title: config.xTitle,
+        y_title: config.yTitle,
+        export_format: config.exportFormat,
+        width: config.width,
+        height: config.height,
+        show_origin: config.showOrigin,
+        show_grid: config.showGrid,
+        show_legend: config.showLegend,
+        legend_position: config.legendPosition,
+        color: config.color,
+        line_width: config.lineWidth,
+        anti_alias: config.antiAlias
+      }
+
+      // 添加自定义文件名
+      if (config.filename.trim()) {
+        requestConfig.filename = config.filename.trim()
+      }
+
+      // 添加坐标轴范围
+      if (config.xMin !== '') requestConfig.x_min = parseFloat(config.xMin)
+      if (config.xMax !== '') requestConfig.x_max = parseFloat(config.xMax)
+      if (config.yMin !== '') requestConfig.y_min = parseFloat(config.yMin)
+      if (config.yMax !== '') requestConfig.y_max = parseFloat(config.yMax)
+
+      // 添加高级字体设置
+      if (config.titleFont) requestConfig.title_font = config.titleFont
+      if (config.titleFontSize > 0) requestConfig.title_font_size = config.titleFontSize
+      if (config.titleColor) requestConfig.title_color = config.titleColor
+      if (config.xTitleFont) requestConfig.x_title_font = config.xTitleFont
+      if (config.yTitleFont) requestConfig.y_title_font = config.yTitleFont
+
+      // 添加模板
+      if (config.template.trim()) {
+        requestConfig.template = config.template.trim()
+      }
+
+      // 添加自定义LabTalk代码
+      if (config.customLabTalk && config.customLabTalk.trim()) {
+        requestConfig.custom_labtalk = config.customLabTalk.trim()
+      }
+
       const res = await axios.post(`${API_BASE}/origin/plot-from-extracted`, {
         data: extractedData,
-        config: extractedConfig
+        config: requestConfig
       })
 
       setPlotResult(res.data)
@@ -245,77 +146,11 @@ const OriginPlotPanel = ({ extractedData = null, onClose = null }) => {
     }
   }
 
-  const executeLabTalk = async () => {
-    if (!labtalkCommand.trim()) return
-
-    setIsPlotting(true)
-    setLabtalkResult(null)
-
-    try {
-      const res = await axios.post(`${API_BASE}/origin/execute-labtalk`, {
-        command: labtalkCommand
-      })
-
-      setLabtalkResult(res.data)
-    } catch (err) {
-      setLabtalkResult({
-        success: false,
-        message: err.response?.data?.detail || err.message || '命令执行失败'
-      })
-    } finally {
-      setIsPlotting(false)
-    }
-  }
-
-  // ==================== 工具函数 ====================
-
-  const parseData = (str) => {
-    if (!str) return []
-    return str.split(/[,\s;]+/)
-      .map(s => parseFloat(s.trim()))
-      .filter(n => !isNaN(n))
-  }
-
-  const generateSampleXYZ = () => {
-    // 生成示例XYZ数据
-    const x = [], y = [], z = []
-    for (let i = 0; i <= 20; i++) {
-      for (let j = 0; j <= 20; j++) {
-        x.push(i / 10)
-        y.push(j / 10)
-        z.push(Math.sin(i / 10) * Math.cos(j / 10))
-      }
-    }
-    setXyzForm({
-      ...xyzForm,
-      xData: x.join(','),
-      yData: y.join(','),
-      zData: z.join(',')
-    })
-  }
-
-  const addMultiDataset = () => {
-    setMultiDatasets([
-      ...multiDatasets,
-      { name: `Dataset ${multiDatasets.length + 1}`, xData: '', yData: '' }
-    ])
-  }
-
-  const removeMultiDataset = (index) => {
-    setMultiDatasets(multiDatasets.filter((_, i) => i !== index))
-  }
-
-  const updateMultiDataset = (index, field, value) => {
-    const newDatasets = [...multiDatasets]
-    newDatasets[index][field] = value
-    setMultiDatasets(newDatasets)
-  }
-
   // ==================== 渲染 ====================
 
   if (!originStatus.available) {
     return (
-      <div className="bg-white rounded-xl shadow-lg p-8 max-w-2xl mx-auto my-8">
+      <div className="bg-white rounded-xl shadow-lg p-8 max-w-2xl mx-auto">
         <div className="text-center">
           <div className="w-16 h-16 bg-yellow-100 rounded-full flex items-center justify-center mx-auto mb-4">
             <svg className="w-8 h-8 text-yellow-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -328,33 +163,35 @@ const OriginPlotPanel = ({ extractedData = null, onClose = null }) => {
             <h3 className="font-semibold text-blue-800 mb-2">使用说明：</h3>
             <ol className="text-sm text-blue-700 space-y-1 list-decimal list-inside">
               <li>确保已安装 Origin 2021 或更高版本</li>
-              <li>在后端运行: <code className="bg-blue-100 px-1 rounded">pip install originpro</code></li>
+              <li>在后端虚拟环境运行: <code className="bg-blue-100 px-1 rounded">pip install originpro</code></li>
               <li>重启后端服务</li>
             </ol>
           </div>
-          <button
-            onClick={checkOriginStatus}
-            className="mt-4 px-6 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition"
-          >
-            重新检查
-          </button>
-          {onClose && (
+          <div className="flex gap-2 justify-center mt-4">
             <button
-              onClick={onClose}
-              className="mt-4 ml-2 px-6 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition"
+              onClick={checkOriginStatus}
+              className="px-6 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition"
             >
-              关闭
+              重新检查
             </button>
-          )}
+            {onClose && (
+              <button
+                onClick={onClose}
+                className="px-6 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition"
+              >
+                关闭
+              </button>
+            )}
+          </div>
         </div>
       </div>
     )
   }
 
   return (
-    <div className="bg-white rounded-xl shadow-lg overflow-hidden">
+    <div className="bg-white rounded-xl shadow-lg overflow-hidden flex flex-col max-h-[90vh]">
       {/* 头部 */}
-      <div className="bg-gradient-to-r from-blue-600 to-indigo-600 px-6 py-4 flex justify-between items-center">
+      <div className="bg-gradient-to-r from-orange-500 to-amber-500 px-6 py-4 flex justify-between items-center flex-shrink-0">
         <div>
           <h2 className="text-2xl font-bold text-white flex items-center gap-2">
             <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -362,13 +199,13 @@ const OriginPlotPanel = ({ extractedData = null, onClose = null }) => {
             </svg>
             Origin 绘图工具
           </h2>
-          <p className="text-blue-100 text-sm mt-1">使用Origin 2022+进行专业科学绘图</p>
+          <p className="text-orange-100 text-sm mt-1">使用Origin 2022绘制提取的数据</p>
         </div>
         <div className="flex items-center gap-2">
           <span className={`px-3 py-1 rounded-full text-sm font-medium ${
             originStatus.can_connect ? 'bg-green-500 text-white' : 'bg-yellow-500 text-white'
           }`}>
-            {originStatus.can_connect ? '已连接' : '未连接'}
+            {originStatus.can_connect ? '已连接Origin' : 'Origin未连接'}
           </span>
           {onClose && (
             <button onClick={onClose} className="text-white hover:bg-white/20 rounded-lg p-2 transition">
@@ -380,605 +217,413 @@ const OriginPlotPanel = ({ extractedData = null, onClose = null }) => {
         </div>
       </div>
 
-      {/* 标签页导航 */}
-      <div className="border-b border-gray-200 bg-gray-50">
-        <nav className="flex space-x-0 overflow-x-auto">
-          {[
-            { id: 'quick', label: '快速绘图', icon: '⚡' },
-            { id: 'advanced', label: '高级设置', icon: '⚙️' },
-            { id: 'xyz', label: '3D/XYZ图表', icon: '🎨' },
-            { id: 'multi', label: '多层图表', icon: '📊' },
-            { id: 'extracted', label: '使用提取数据', icon: '📈', disabled: !extractedData || extractedData.length === 0 },
-            { id: 'labtalk', label: 'LabTalk', icon: '💻' }
-          ].map(tab => (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
-              disabled={tab.disabled}
-              className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap flex items-center gap-1 ${
-                activeTab === tab.id
-                  ? 'border-blue-500 text-blue-600 bg-white'
-                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-100'
-              } ${tab.disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
-            >
-              <span>{tab.icon}</span>
-              {tab.label}
-            </button>
-          ))}
-        </nav>
-      </div>
-
-      {/* 内容区 */}
-      <div className="p-6 grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* 左侧: 输入区 */}
+      {/* 主内容区 - 可滚动 */}
+      <div className="p-6 grid grid-cols-1 lg:grid-cols-2 gap-6 overflow-y-auto flex-1">
+        {/* 左侧: 配置区 */}
         <div className="space-y-6">
+          {/* 数据信息 */}
+          <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+            <h3 className="font-semibold text-blue-800 mb-2">当前数据</h3>
+            <p className="text-sm text-blue-600">
+              {extractedData && extractedData.length > 0
+                ? `共 ${extractedData.length} 个数据点`
+                : '没有可用的数据'}
+            </p>
+            {extractedData && extractedData.length > 0 && (
+              <p className="text-xs text-blue-500 mt-1">
+                X范围: [{extractedData[0].x.toFixed(2)}, {extractedData[extractedData.length - 1].x.toFixed(2)}]
+                &nbsp;|&nbsp;
+                Y范围: [{Math.min(...extractedData.map(d => d.y)).toFixed(2)}, {Math.max(...extractedData.map(d => d.y)).toFixed(2)}]
+              </p>
+            )}
+          </div>
 
-          {/* 快速绘图 */}
-          {activeTab === 'quick' && (
-            <div className="space-y-4">
-              <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-                <h3 className="font-semibold text-blue-800 mb-2">快速绘图</h3>
-                <p className="text-sm text-blue-600">输入数据（逗号分隔）快速创建图表</p>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">图表类型</label>
-                <select
-                  value={quickForm.plotType}
-                  onChange={(e) => setQuickForm({ ...quickForm, plotType: e.target.value })}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+          {/* 图表类型选择 */}
+          <div className="bg-gray-50 rounded-lg p-4">
+            <h3 className="font-semibold text-gray-800 mb-3">图表类型</h3>
+            <div className="grid grid-cols-3 gap-2">
+              {[
+                { value: 'line', label: '折线图', icon: '📈' },
+                { value: 'scatter', label: '散点图', icon: '🔵' },
+                { value: 'line_symbol', label: '线+符号', icon: '📊' }
+              ].map(type => (
+                <button
+                  key={type.value}
+                  onClick={() => setConfig({ ...config, plotType: type.value })}
+                  className={`p-3 rounded-lg border-2 transition-all ${
+                    config.plotType === type.value
+                      ? 'border-orange-500 bg-orange-50 text-orange-700'
+                      : 'border-gray-200 hover:border-gray-300'
+                  }`}
                 >
-                  <option value="line">折线图 (Line)</option>
-                  <option value="scatter">散点图 (Scatter)</option>
-                  <option value="line_symbol">线符号图 (Line+Symbol)</option>
-                  <option value="column">柱状图 (Column)</option>
-                  <option value="bar">条形图 (Bar)</option>
-                  <option value="area">面积图 (Area)</option>
-                  <option value="stacked_column">堆叠柱状图</option>
-                  <option value="double_y">双Y轴图</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">X轴数据 (逗号分隔)</label>
-                <input
-                  type="text"
-                  value={quickForm.xData}
-                  onChange={(e) => setQuickForm({ ...quickForm, xData: e.target.value })}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 font-mono text-sm focus:ring-2 focus:ring-blue-500"
-                  placeholder="例如: 1,2,3,4,5"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Y轴数据 (逗号分隔)</label>
-                <input
-                  type="text"
-                  value={quickForm.yData}
-                  onChange={(e) => setQuickForm({ ...quickForm, yData: e.target.value })}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 font-mono text-sm focus:ring-2 focus:ring-blue-500"
-                  placeholder="例如: 10,20,15,25,30"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">图表标题</label>
-                  <input
-                    type="text"
-                    value={quickForm.title}
-                    onChange={(e) => setQuickForm({ ...quickForm, title: e.target.value })}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">X轴标题</label>
-                  <input
-                    type="text"
-                    value={quickForm.xTitle}
-                    onChange={(e) => setQuickForm({ ...quickForm, xTitle: e.target.value })}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Y轴标题</label>
-                <input
-                  type="text"
-                  value={quickForm.yTitle}
-                  onChange={(e) => setQuickForm({ ...quickForm, yTitle: e.target.value })}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500"
-                />
-              </div>
-
-              <button
-                onClick={plotQuick}
-                disabled={isPlotting}
-                className="w-full py-3 bg-gradient-to-r from-blue-500 to-indigo-500 text-white rounded-lg font-medium hover:from-blue-600 hover:to-indigo-600 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-              >
-                {isPlotting ? (
-                  <>
-                    <svg className="animate-spin w-5 h-5" fill="none" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                    </svg>
-                    绘图中...
-                  </>
-                ) : (
-                  <>
-                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-                    </svg>
-                    绘制图表
-                  </>
-                )}
-              </button>
-            </div>
-          )}
-
-          {/* 高级设置 */}
-          {activeTab === 'advanced' && (
-            <div className="space-y-4">
-              <div className="bg-purple-50 border border-purple-200 rounded-lg p-4">
-                <h3 className="font-semibold text-purple-800 mb-2">高级设置</h3>
-                <p className="text-sm text-purple-600">自定义图表样式和导出选项</p>
-              </div>
-
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">图表宽度</label>
-                  <input
-                    type="number"
-                    value={advancedSettings.width}
-                    onChange={(e) => setAdvancedSettings({ ...advancedSettings, width: parseInt(e.target.value) })}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">图表高度</label>
-                  <input
-                    type="number"
-                    value={advancedSettings.height}
-                    onChange={(e) => setAdvancedSettings({ ...advancedSettings, height: parseInt(e.target.value) })}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">导出格式</label>
-                <select
-                  value={advancedSettings.exportFormat}
-                  onChange={(e) => setAdvancedSettings({ ...advancedSettings, exportFormat: e.target.value })}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2"
-                >
-                  <option value="png">PNG</option>
-                  <option value="jpg">JPG</option>
-                  <option value="pdf">PDF</option>
-                  <option value="svg">SVG</option>
-                  <option value="eps">EPS</option>
-                  <option value="emf">EMF</option>
-                  <option value="tiff">TIFF</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">曲线颜色</label>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="color"
-                    value={advancedSettings.color}
-                    onChange={(e) => setAdvancedSettings({ ...advancedSettings, color: e.target.value })}
-                    className="w-12 h-10 rounded cursor-pointer"
-                  />
-                  <input
-                    type="text"
-                    value={advancedSettings.color}
-                    onChange={(e) => setAdvancedSettings({ ...advancedSettings, color: e.target.value })}
-                    className="flex-1 border border-gray-300 rounded-lg px-3 py-2 font-mono text-sm"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">X轴最小值</label>
-                  <input
-                    type="number"
-                    value={advancedSettings.xMin}
-                    onChange={(e) => setAdvancedSettings({ ...advancedSettings, xMin: e.target.value })}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2"
-                    placeholder="自动"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">X轴最大值</label>
-                  <input
-                    type="number"
-                    value={advancedSettings.xMax}
-                    onChange={(e) => setAdvancedSettings({ ...advancedSettings, xMax: e.target.value })}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2"
-                    placeholder="自动"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Y轴最小值</label>
-                  <input
-                    type="number"
-                    value={advancedSettings.yMin}
-                    onChange={(e) => setAdvancedSettings({ ...advancedSettings, yMin: e.target.value })}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2"
-                    placeholder="自动"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Y轴最大值</label>
-                  <input
-                    type="number"
-                    value={advancedSettings.yMax}
-                    onChange={(e) => setAdvancedSettings({ ...advancedSettings, yMax: e.target.value })}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2"
-                    placeholder="自动"
-                  />
-                </div>
-              </div>
-
-              <div className="flex items-center gap-4">
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={advancedSettings.showGrid}
-                    onChange={(e) => setAdvancedSettings({ ...advancedSettings, showGrid: e.target.checked })}
-                    className="w-4 h-4 text-blue-600 rounded"
-                  />
-                  <span className="text-sm text-gray-700">显示网格</span>
-                </label>
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={advancedSettings.showLegend}
-                    onChange={(e) => setAdvancedSettings({ ...advancedSettings, showLegend: e.target.checked })}
-                    className="w-4 h-4 text-blue-600 rounded"
-                  />
-                  <span className="text-sm text-gray-700">显示图例</span>
-                </label>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Origin模板 (.otp文件路径)</label>
-                <input
-                  type="text"
-                  value={advancedSettings.template}
-                  onChange={(e) => setAdvancedSettings({ ...advancedSettings, template: e.target.value })}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 font-mono text-sm"
-                  placeholder="留空使用默认模板"
-                />
-              </div>
-            </div>
-          )}
-
-          {/* XYZ图表 */}
-          {activeTab === 'xyz' && (
-            <div className="space-y-4">
-              <div className="bg-green-50 border border-green-200 rounded-lg p-4">
-                <h3 className="font-semibold text-green-800 mb-2">3D/XYZ图表</h3>
-                <p className="text-sm text-green-600">创建3D曲面图、等高线图、热图等</p>
-              </div>
-
-              <button
-                onClick={generateSampleXYZ}
-                className="text-sm text-blue-600 hover:text-blue-800 underline"
-              >
-                生成示例XYZ数据
-              </button>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">图表类型</label>
-                <select
-                  value={xyzForm.plotType}
-                  onChange={(e) => setXyzForm({ ...xyzForm, plotType: e.target.value })}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2"
-                >
-                  <option value="surface_colormap">3D彩色曲面 (Surface Colormap)</option>
-                  <option value="surface">3D曲面 (Surface)</option>
-                  <option value="contour">等高线图 (Contour)</option>
-                  <option value="xyz_contour">XYZ等高线 (XYZ Contour)</option>
-                  <option value="tri_contour">三角网格等高线 (Tri Contour)</option>
-                  <option value="heatmap">热图 (Heatmap)</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">X数据 (逗号分隔)</label>
-                <textarea
-                  value={xyzForm.xData}
-                  onChange={(e) => setXyzForm({ ...xyzForm, xData: e.target.value })}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 font-mono text-sm h-20"
-                  placeholder="例如: 1,2,3,1,2,3,..."
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Y数据 (逗号分隔)</label>
-                <textarea
-                  value={xyzForm.yData}
-                  onChange={(e) => setXyzForm({ ...xyzForm, yData: e.target.value })}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 font-mono text-sm h-20"
-                  placeholder="例如: 1,1,1,2,2,2,..."
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Z数据 (逗号分隔)</label>
-                <textarea
-                  value={xyzForm.zData}
-                  onChange={(e) => setXyzForm({ ...xyzForm, zData: e.target.value })}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 font-mono text-sm h-20"
-                  placeholder="例如: 0.5,0.6,0.7,0.4,0.5,0.6,..."
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">颜色映射</label>
-                <select
-                  value={xyzForm.colormap}
-                  onChange={(e) => setXyzForm({ ...xyzForm, colormap: e.target.value })}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2"
-                >
-                  <option value="Maple.pal">Maple</option>
-                  <option value="Rainbow.pal">Rainbow</option>
-                  <option value="BlueYellow.pal">BlueYellow</option>
-                  <option value="RedBlue.pal">RedBlue</option>
-                  <option value="Gray.pal">Gray</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">图表标题</label>
-                <input
-                  type="text"
-                  value={xyzForm.title}
-                  onChange={(e) => setXyzForm({ ...xyzForm, title: e.target.value })}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2"
-                />
-              </div>
-
-              <button
-                onClick={plotXYZ}
-                disabled={isPlotting}
-                className="w-full py-3 bg-gradient-to-r from-green-500 to-emerald-500 text-white rounded-lg font-medium hover:from-green-600 hover:to-emerald-600 transition disabled:opacity-50"
-              >
-                {isPlotting ? '绘图中...' : '绘制3D图表'}
-              </button>
-            </div>
-          )}
-
-          {/* 多层图表 */}
-          {activeTab === 'multi' && (
-            <div className="space-y-4">
-              <div className="bg-orange-50 border border-orange-200 rounded-lg p-4">
-                <h3 className="font-semibold text-orange-800 mb-2">多层图表</h3>
-                <p className="text-sm text-orange-600">创建包含多个数据面板的图表</p>
-              </div>
-
-              {multiDatasets.map((dataset, index) => (
-                <div key={index} className="border border-gray-200 rounded-lg p-4 space-y-3">
-                  <div className="flex justify-between items-center">
-                    <input
-                      type="text"
-                      value={dataset.name}
-                      onChange={(e) => updateMultiDataset(index, 'name', e.target.value)}
-                      className="font-medium text-gray-700 bg-transparent border-none focus:outline-none"
-                    />
-                    {multiDatasets.length > 1 && (
-                      <button
-                        onClick={() => removeMultiDataset(index)}
-                        className="text-red-500 hover:text-red-700 text-sm"
-                      >
-                        删除
-                      </button>
-                    )}
-                  </div>
-                  <div>
-                    <label className="block text-xs text-gray-500 mb-1">X数据</label>
-                    <input
-                      type="text"
-                      value={dataset.xData}
-                      onChange={(e) => updateMultiDataset(index, 'xData', e.target.value)}
-                      className="w-full border border-gray-300 rounded px-2 py-1 text-sm font-mono"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-gray-500 mb-1">Y数据</label>
-                    <input
-                      type="text"
-                      value={dataset.yData}
-                      onChange={(e) => updateMultiDataset(index, 'yData', e.target.value)}
-                      className="w-full border border-gray-300 rounded px-2 py-1 text-sm font-mono"
-                    />
-                  </div>
-                </div>
+                  <div className="text-xl">{type.icon}</div>
+                  <div className="text-xs mt-1">{type.label}</div>
+                </button>
               ))}
-
-              <button
-                onClick={addMultiDataset}
-                className="w-full py-2 border-2 border-dashed border-gray-300 rounded-lg text-gray-500 hover:border-blue-400 hover:text-blue-500 transition"
-              >
-                + 添加数据集
-              </button>
-
-              <button
-                onClick={plotMulti}
-                disabled={isPlotting}
-                className="w-full py-3 bg-gradient-to-r from-orange-500 to-amber-500 text-white rounded-lg font-medium hover:from-orange-600 hover:to-amber-600 transition disabled:opacity-50"
-              >
-                {isPlotting ? '绘图中...' : '绘制多层图表'}
-              </button>
             </div>
-          )}
+          </div>
 
-          {/* 使用提取数据 */}
-          {activeTab === 'extracted' && (
-            <div className="space-y-4">
-              <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-4">
-                <h3 className="font-semibold text-indigo-800 mb-2">使用提取的数据</h3>
-                <p className="text-sm text-indigo-600">
-                  当前有 <strong>{extractedData?.length || 0}</strong> 个数据点
-                </p>
-              </div>
-
+          {/* 导出设置 */}
+          <div className="bg-gray-50 rounded-lg p-4">
+            <h3 className="font-semibold text-gray-800 mb-3">导出设置</h3>
+            <div className="space-y-3">
+              {/* 文件名自定义 */}
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">图表类型</label>
-                <select
-                  value={extractedConfig.plotType}
-                  onChange={(e) => setExtractedConfig({ ...extractedConfig, plotType: e.target.value })}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2"
-                >
-                  <option value="line">折线图</option>
-                  <option value="scatter">散点图</option>
-                  <option value="line_symbol">线符号图</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">图表标题</label>
+                <label className="block text-xs text-gray-500 mb-1">文件名（不含扩展名）</label>
                 <input
                   type="text"
-                  value={extractedConfig.title}
-                  onChange={(e) => setExtractedConfig({ ...extractedConfig, title: e.target.value })}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2"
+                  value={config.filename}
+                  onChange={(e) => setConfig({ ...config, filename: e.target.value })}
+                  placeholder="留空自动生成"
+                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
                 />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">导出格式</label>
-                <select
-                  value={extractedConfig.exportFormat}
-                  onChange={(e) => setExtractedConfig({ ...extractedConfig, exportFormat: e.target.value })}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2"
-                >
-                  <option value="png">PNG</option>
-                  <option value="pdf">PDF</option>
-                  <option value="svg">SVG</option>
-                </select>
+                <p className="text-xs text-gray-400 mt-1">自定义图片和项目文件名，留空则自动生成</p>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">宽度</label>
+                  <label className="block text-xs text-gray-500 mb-1">导出格式</label>
+                  <select
+                    value={config.exportFormat}
+                    onChange={(e) => setConfig({ ...config, exportFormat: e.target.value })}
+                    className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm"
+                  >
+                    <option value="png">PNG图片</option>
+                    <option value="pdf">PDF文档</option>
+                    <option value="svg">SVG矢量图</option>
+                    <option value="emf">EMF矢量图</option>
+                    <option value="eps">EPS矢量图</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">图表尺寸</label>
+                  <select
+                    value={config.width}
+                    onChange={(e) => setConfig({ ...config, width: parseInt(e.target.value), height: parseInt(e.target.value) * 0.75 })}
+                    className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm"
+                  >
+                    <option value={600}>600×450</option>
+                    <option value={800}>800×600</option>
+                    <option value={1200}>1200×900</option>
+                    <option value={1600}>1600×1200</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* 图表标题和轴标签 */}
+          <div className="bg-gray-50 rounded-lg p-4">
+            <h3 className="font-semibold text-gray-800 mb-3">标题和标签</h3>
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">图表标题</label>
+                <input
+                  type="text"
+                  value={config.title}
+                  onChange={(e) => setConfig({ ...config, title: e.target.value })}
+                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">X轴标题</label>
                   <input
-                    type="number"
-                    value={extractedConfig.width}
-                    onChange={(e) => setExtractedConfig({ ...extractedConfig, width: parseInt(e.target.value) })}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2"
+                    type="text"
+                    value={config.xTitle}
+                    onChange={(e) => setConfig({ ...config, xTitle: e.target.value })}
+                    className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm"
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">高度</label>
+                  <label className="block text-xs text-gray-500 mb-1">Y轴标题</label>
                   <input
-                    type="number"
-                    value={extractedConfig.height}
-                    onChange={(e) => setExtractedConfig({ ...extractedConfig, height: parseInt(e.target.value) })}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2"
+                    type="text"
+                    value={config.yTitle}
+                    onChange={(e) => setConfig({ ...config, yTitle: e.target.value })}
+                    className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm"
                   />
                 </div>
               </div>
-
-              <button
-                onClick={plotFromExtracted}
-                disabled={isPlotting}
-                className="w-full py-3 bg-gradient-to-r from-indigo-500 to-purple-500 text-white rounded-lg font-medium hover:from-indigo-600 hover:to-purple-600 transition disabled:opacity-50"
-              >
-                {isPlotting ? '绘图中...' : '使用Origin绘制提取的数据'}
-              </button>
             </div>
-          )}
+          </div>
 
-          {/* LabTalk */}
-          {activeTab === 'labtalk' && (
-            <div className="space-y-4">
-              <div className="bg-gray-100 border border-gray-300 rounded-lg p-4">
-                <h3 className="font-semibold text-gray-800 mb-2">LabTalk 脚本</h3>
-                <p className="text-sm text-gray-600">
-                  LabTalk是Origin的脚本语言，可用于高级操作
-                </p>
-                <a
-                  href="https://www.originlab.com/doc/LabTalk"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-sm text-blue-600 hover:underline"
-                >
-                  查看LabTalk文档 &rarr;
-                </a>
+          {/* 高级选项 */}
+          <details className="bg-gray-50 rounded-lg p-4">
+            <summary className="font-semibold text-gray-800 cursor-pointer">高级选项</summary>
+            <div className="mt-3 space-y-4">
+              {/* 显示选项 */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-gray-700">显示Origin窗口</span>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={config.showOrigin}
+                      onChange={(e) => setConfig({ ...config, showOrigin: e.target.checked })}
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-orange-500"></div>
+                  </label>
+                </div>
+                <p className="text-xs text-gray-500 -mt-1">勾选后会在绘图时显示Origin软件窗口，可用于调试</p>
+
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-gray-700">显示网格线</span>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={config.showGrid}
+                      onChange={(e) => setConfig({ ...config, showGrid: e.target.checked })}
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-orange-500"></div>
+                  </label>
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-gray-700">显示图例</span>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={config.showLegend}
+                      onChange={(e) => setConfig({ ...config, showLegend: e.target.checked })}
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-orange-500"></div>
+                  </label>
+                </div>
+
+                {config.showLegend && (
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">图例位置</label>
+                    <select
+                      value={config.legendPosition}
+                      onChange={(e) => setConfig({ ...config, legendPosition: e.target.value })}
+                      className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm"
+                    >
+                      <option value="top-right">右上角</option>
+                      <option value="top-left">左上角</option>
+                      <option value="bottom-right">右下角</option>
+                      <option value="bottom-left">左下角</option>
+                      <option value="center">居中</option>
+                    </select>
+                  </div>
+                )}
+
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-gray-700">抗锯齿</span>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={config.antiAlias}
+                      onChange={(e) => setConfig({ ...config, antiAlias: e.target.checked })}
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-orange-500"></div>
+                  </label>
+                </div>
               </div>
 
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">LabTalk命令</label>
-                <textarea
-                  value={labtalkCommand}
-                  onChange={(e) => setLabtalkCommand(e.target.value)}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 font-mono text-sm h-32 bg-gray-50"
-                  placeholder='例如: doc -uw;  // 保存项目'
+              {/* 曲线样式 */}
+              <div className="border-t pt-3">
+                <h4 className="text-sm font-medium text-gray-700 mb-2">曲线样式</h4>
+                <div className="space-y-2">
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">曲线颜色</label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="color"
+                        value={config.color}
+                        onChange={(e) => setConfig({ ...config, color: e.target.value })}
+                        className="w-10 h-8 rounded cursor-pointer border"
+                      />
+                      <input
+                        type="text"
+                        value={config.color}
+                        onChange={(e) => setConfig({ ...config, color: e.target.value })}
+                        className="flex-1 border border-gray-300 rounded px-2 py-1 text-sm font-mono"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">线宽: {config.lineWidth}</label>
+                    <input
+                      type="range"
+                      min="0.5"
+                      max="5"
+                      step="0.5"
+                      value={config.lineWidth}
+                      onChange={(e) => setConfig({ ...config, lineWidth: parseFloat(e.target.value) })}
+                      className="w-full"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* 坐标轴范围 */}
+              <div className="border-t pt-3">
+                <h4 className="text-sm font-medium text-gray-700 mb-2">坐标轴范围</h4>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">X最小值</label>
+                    <input
+                      type="number"
+                      value={config.xMin}
+                      onChange={(e) => setConfig({ ...config, xMin: e.target.value })}
+                      placeholder="自动"
+                      className="w-full border border-gray-300 rounded px-2 py-1 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">X最大值</label>
+                    <input
+                      type="number"
+                      value={config.xMax}
+                      onChange={(e) => setConfig({ ...config, xMax: e.target.value })}
+                      placeholder="自动"
+                      className="w-full border border-gray-300 rounded px-2 py-1 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">Y最小值</label>
+                    <input
+                      type="number"
+                      value={config.yMin}
+                      onChange={(e) => setConfig({ ...config, yMin: e.target.value })}
+                      placeholder="自动"
+                      className="w-full border border-gray-300 rounded px-2 py-1 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">Y最大值</label>
+                    <input
+                      type="number"
+                      value={config.yMax}
+                      onChange={(e) => setConfig({ ...config, yMax: e.target.value })}
+                      placeholder="自动"
+                      className="w-full border border-gray-300 rounded px-2 py-1 text-sm"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Origin模板 */}
+              <div className="border-t pt-3">
+                <h4 className="text-sm font-medium text-gray-700 mb-2">Origin模板 (.otp)</h4>
+                <input
+                  type="text"
+                  value={config.template}
+                  onChange={(e) => setConfig({ ...config, template: e.target.value })}
+                  placeholder="例如: D:\Desktop\BG\tu\ENLARGED.otp"
+                  className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm font-mono"
                 />
-              </div>
-
-              <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3">
-                <h4 className="font-medium text-yellow-800 mb-2">常用命令示例:</h4>
-                <ul className="text-sm text-yellow-700 space-y-1">
-                  <li><code>doc -uw;</code> - 保存项目</li>
-                  <li><code>layer -s 1;</code> - 选择图层1</li>
-                  <li><code>worksheet -s 1;</code> - 选择工作表1</li>
-                  <li><code>type -b "Hello";</code> - 显示消息</li>
+                <p className="text-xs text-gray-500 mt-2">
+                  💡 模板使用说明：
+                </p>
+                <ul className="text-xs text-gray-500 mt-1 space-y-1 list-disc list-inside">
+                  <li>支持Origin内置模板名: <code className="bg-gray-100 px-1 rounded">line</code>, <code className="bg-gray-100 px-1 rounded">scatter</code>, <code className="bg-gray-100 px-1 rounded">column</code></li>
+                  <li>或输入完整路径: <code className="bg-gray-100 px-1 rounded">D:\Desktop\BG\tu\ENLARGED.otp</code></li>
+                  <li>模板会预定义图表样式、颜色、字体等设置</li>
+                  <li>留空则使用默认模板</li>
                 </ul>
               </div>
 
-              <button
-                onClick={executeLabTalk}
-                disabled={isPlotting || !labtalkCommand.trim()}
-                className="w-full py-3 bg-gradient-to-r from-gray-600 to-gray-700 text-white rounded-lg font-medium hover:from-gray-700 hover:to-gray-800 transition disabled:opacity-50"
-              >
-                {isPlotting ? '执行中...' : '执行LabTalk命令'}
-              </button>
-
-              {labtalkResult && (
-                <div className={`p-3 rounded-lg ${labtalkResult.success ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
-                  {labtalkResult.message}
-                </div>
-              )}
+              {/* 自定义LabTalk代码 */}
+              <div className="border-t pt-3">
+                <h4 className="text-sm font-medium text-gray-700 mb-2">自定义LabTalk代码 (高级)</h4>
+                <textarea
+                  value={config.customLabTalk || ''}
+                  onChange={(e) => setConfig({ ...config, customLabTalk: e.target.value })}
+                  placeholder='// 自定义Origin LabTalk命令&#10;// 例如: layer.x.label="Time (s)";&#10;// 例如: legend.fcolor=1;'
+                  className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm font-mono h-20 resize-y"
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  在绘图完成后执行的自定义LabTalk脚本命令
+                </p>
+              </div>
             </div>
-          )}
+          </details>
+
+          {/* 绘图按钮 */}
+          <button
+            onClick={plotFromExtracted}
+            disabled={isPlotting || !extractedData || extractedData.length === 0}
+            className="w-full py-4 bg-gradient-to-r from-orange-500 to-amber-500 text-white rounded-xl font-bold text-lg hover:from-orange-600 hover:to-amber-600 transition disabled:opacity-50 disabled:cursor-not-allowed shadow-lg flex items-center justify-center gap-2"
+          >
+            {isPlotting ? (
+              <>
+                <svg className="animate-spin w-5 h-5" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                </svg>
+                正在绘图...
+              </>
+            ) : (
+              <>
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                </svg>
+                使用Origin绘制图表
+              </>
+            )}
+          </button>
         </div>
 
         {/* 右侧: 结果区 */}
         <div className="space-y-4">
-          <div className="bg-gray-50 border border-gray-200 rounded-xl p-4">
+          <div className="bg-gray-50 border border-gray-200 rounded-xl p-4 min-h-[400px]">
             <h3 className="font-semibold text-gray-800 mb-3">绘图结果</h3>
 
             {plotResult ? (
               <div className="space-y-4">
                 {plotResult.success ? (
                   <>
-                    <div className="bg-green-50 border border-green-200 rounded-lg p-3">
+                    <div className="bg-green-50 border border-green-200 rounded-lg p-3 flex items-center gap-2">
+                      <svg className="w-5 h-5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                      </svg>
                       <p className="text-green-700 text-sm">{plotResult.message}</p>
                     </div>
 
-                    {/* 图片预览 */}
+                    {/* 图片预览 - 支持PDF和SVG */}
                     {plotResult.image_path && (
                       <div>
                         <p className="text-sm text-gray-600 mb-2">导出的图表:</p>
                         <div className="border border-gray-200 rounded-lg overflow-hidden bg-white">
-                          <img
-                            src={`/${plotResult.image_path.replace('\\', '/')}`}
-                            alt="Origin Plot"
-                            className="w-full h-auto"
-                            onError={(e) => {
-                              e.target.src = `http://localhost:8000/${plotResult.image_path.replace('\\', '/')}`
-                            }}
-                          />
+                          {plotResult.image_path.toLowerCase().endsWith('.pdf') ? (
+                            // PDF预览
+                            <div className="flex flex-col items-center justify-center p-8 bg-gray-50">
+                              <svg className="w-16 h-16 text-red-500 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+                              </svg>
+                              <p className="text-sm text-gray-600 mb-2">PDF文件已生成</p>
+                              <p className="text-xs text-gray-500">点击下方"下载图表图片"按钮查看</p>
+                            </div>
+                          ) : plotResult.image_path.toLowerCase().endsWith('.svg') ||
+                            plotResult.image_path.toLowerCase().endsWith('.emf') ||
+                            plotResult.image_path.toLowerCase().endsWith('.eps') ? (
+                            // 矢量图预览
+                            <div className="flex flex-col items-center justify-center p-8 bg-gray-50">
+                              <svg className="w-16 h-16 text-purple-500 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                              </svg>
+                              <p className="text-sm text-gray-600 mb-2">矢量图文件已生成</p>
+                              <p className="text-xs text-gray-500">可在矢量图软件中编辑</p>
+                            </div>
+                          ) : (
+                            // 普通图片预览
+                            <img
+                              src={`/outputs/${plotResult.image_path.split(/[\\/]/).pop()}`}
+                              alt="Origin Plot"
+                              className="w-full h-auto"
+                              onError={(e) => {
+                                const pathParts = plotResult.image_path.replace(/\\/g, '/').split('/')
+                                const filename = pathParts.pop()
+                                e.target.src = `/outputs/${filename}`
+                              }}
+                            />
+                          )}
                         </div>
                       </div>
                     )}
@@ -987,10 +632,10 @@ const OriginPlotPanel = ({ extractedData = null, onClose = null }) => {
                     <div className="space-y-2">
                       {plotResult.image_path && (
                         <a
-                          href={`http://localhost:8000/${plotResult.image_path.replace('\\', '/')}`}
+                          href={`http://localhost:8000/outputs/${plotResult.image_path.split(/[\\/]/).pop()}`}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="flex items-center justify-center gap-2 w-full py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition"
+                          className="flex items-center justify-center gap-2 w-full py-3 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition"
                         >
                           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
@@ -1000,10 +645,10 @@ const OriginPlotPanel = ({ extractedData = null, onClose = null }) => {
                       )}
                       {plotResult.project_path && (
                         <a
-                          href={`http://localhost:8000/${plotResult.project_path.replace('\\', '/')}`}
+                          href={`/outputs/${plotResult.project_path.split(/[\\/]/).pop()}`}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="flex items-center justify-center gap-2 w-full py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 transition"
+                          className="flex items-center justify-center gap-2 w-full py-3 bg-orange-500 text-white rounded-lg hover:bg-orange-600 transition"
                         >
                           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
@@ -1012,33 +657,39 @@ const OriginPlotPanel = ({ extractedData = null, onClose = null }) => {
                         </a>
                       )}
                     </div>
+
+                    {/* 提示 */}
+                    <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3">
+                      <p className="text-yellow-700 text-xs">
+                        💡 提示: 下载的.opju文件可以用Origin 2022打开，可以进行进一步编辑和分析
+                      </p>
+                    </div>
                   </>
                 ) : (
-                  <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+                  <div className="bg-red-50 border border-red-200 rounded-lg p-4">
                     <p className="text-red-700 text-sm">{plotResult.message}</p>
                   </div>
                 )}
               </div>
             ) : (
-              <div className="text-center py-12 text-gray-400">
-                <svg className="w-16 h-16 mx-auto mb-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <div className="flex flex-col items-center justify-center h-80 text-gray-400">
+                <svg className="w-20 h-20 mb-4 opacity-30" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
                 </svg>
-                <p>输入数据并点击"绘制图表"</p>
-                <p className="text-sm mt-1">生成的图表将显示在这里</p>
+                <p className="text-sm">点击"使用Origin绘制图表"按钮</p>
+                <p className="text-xs mt-1">生成的图表将显示在这里</p>
               </div>
             )}
           </div>
 
           {/* 使用说明 */}
           <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
-            <h4 className="font-semibold text-blue-800 mb-2">使用说明</h4>
+            <h4 className="font-semibold text-blue-800 mb-2">关于Origin绘图</h4>
             <ul className="text-sm text-blue-700 space-y-1">
-              <li>• 支持多种2D图表: 折线图、散点图、柱状图等</li>
-              <li>• 支持多种3D图表: 曲面图、等高线图、热图等</li>
-              <li>• 可以直接使用从图表中提取的数据绘图</li>
-              <li>• 支持导出PNG、PDF、SVG等多种格式</li>
-              <li>• 支持使用自定义Origin模板</li>
+              <li>• Origin是专业的科学绘图和分析软件</li>
+              <li>• 支持多种2D图表类型和样式定制</li>
+              <li>• 导出的.opju文件可在Origin中继续编辑</li>
+              <li>• 勾选"显示Origin窗口"可查看Origin绘图过程</li>
             </ul>
           </div>
         </div>

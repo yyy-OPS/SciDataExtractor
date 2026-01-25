@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { Stage, Layer, Image as KonvaImage, Line, Circle, Rect } from 'react-konva'
 import useImage from 'use-image'
 
-const API_BASE = 'http://localhost:8000'
+const API_BASE = ''
 
 /**
  * LayerEditor - Photoshop 风格的图层编辑器 v3.0

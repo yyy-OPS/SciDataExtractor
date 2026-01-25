@@ -7,7 +7,7 @@ import LayerEditor from './components/LayerEditor'
 import OriginPlotPanel from './components/OriginPlotPanel'
 import './App.css'
 
-const API_BASE = 'http://localhost:8000'
+const API_BASE = ''
 
 function App() {
   // ========== 状态管理 ==========

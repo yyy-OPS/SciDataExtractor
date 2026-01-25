@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import List, Optional, Union
 import os
+import sys
 import uuid
 import shutil
 import numpy as np
@@ -29,6 +30,20 @@ except ImportError as e:
 
 # Load environment variables
 load_dotenv()
+
+# Determine base directory
+if getattr(sys, 'frozen', False):
+    if hasattr(sys, '_MEIPASS'):
+        base_dir = Path(sys._MEIPASS)
+    else:
+        base_dir = Path(sys.executable).parent
+else:
+    base_dir = Path(__file__).parent.parent
+
+# Frontend dist directory
+dist_dir = base_dir / "dist"
+if not dist_dir.exists():
+    dist_dir = Path(__file__).parent.parent / "frontend" / "dist"
 
 # Create FastAPI app instance
 app = FastAPI(title="SciDataExtractor API", version="2.0.0")
@@ -50,6 +65,10 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 # Mount static files for outputs
 app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
+
+# Mount frontend static assets
+if dist_dir.exists() and (dist_dir / "assets").exists():
+    app.mount("/assets", StaticFiles(directory=str(dist_dir / "assets")), name="assets")
 
 # Store image processor instances per session
 processors = {}
@@ -186,9 +205,9 @@ class ExtractFromCurveRequest(BaseModel):
 
 # ==================== API Endpoints ====================
 
-@app.get("/")
-async def root():
-    """Root path - API health check"""
+@app.get("/api/health")
+async def health_check():
+    """API health check"""
     ai_status = "available" if get_ai_assistant() is not None else "not configured"
     return {
         "message": "SciDataExtractor API is running",
@@ -199,6 +218,14 @@ async def root():
             "ai": ["/ai/config", "/ai/analyze", "/ai/suggest-calibration", "/ai/identify-color"]
         }
     }
+
+
+@app.get("/")
+async def root():
+    """Serve frontend index.html"""
+    if dist_dir.exists() and (dist_dir / "index.html").exists():
+        return FileResponse(str(dist_dir / "index.html"))
+    return {"message": "Frontend not found. API is running at /api/health"}
 
 
 @app.post("/upload")
@@ -1354,10 +1381,23 @@ async def origin_plot_from_extracted(request: dict):
     """
     使用从图表中提取的数据在Origin中重新绘图
 
-    这个端点将数据提取功能和Origin绘图功能连接起来
+    支持的配置项:
+    - data: 数据点数组 [{x, y}, ...]
+    - config: 完整配置对象
+        - filename: 文件名（不含扩展名）
+        - graph_type: 图表类型
+        - color: 线条颜色（自动使用用户选择的颜色）
+        - title, x_title, y_title: 标题
+        - width, height: 图片尺寸
+        - show_grid, show_legend: 显示选项
+        - line_width: 线宽
+        - export_format: 导出格式
+        - template: Origin模板路径或内置模板名
+        - custom_labtalk: 自定义LabTalk代码
     """
     try:
-        from origin_plotter import OriginPlotter, GraphType, ExportFormat, GraphConfig, AxisConfig, WorksheetData, DataColumn, PlotRequest
+        from origin_plotter import plot_with_origin, OriginGraphConfig, ExportFormat
+        import os
 
         data_points = request.get("data", [])
         config = request.get("config", {})
@@ -1366,48 +1406,86 @@ async def origin_plot_from_extracted(request: dict):
             raise HTTPException(status_code=400, detail="没有数据可绘制")
 
         # 分离X和Y数据
-        x_data = [p["x"] for p in data_points]
-        y_data = [p["y"] for p in data_points]
+        x_data = [float(p["x"]) for p in data_points]
+        y_data = [float(p["y"]) for p in data_points]
 
-        columns = [
-            DataColumn("X", x_data, axis="X"),
-            DataColumn("Y", y_data, axis="Y")
-        ]
-        ws_data = WorksheetData(name="ExtractedData", columns=columns)
-
-        graph_type = config.get("graph_type", "line")
-        graph_type_map = {
-            "line": GraphType.LINE,
-            "scatter": GraphType.SCATTER,
-            "line_symbol": GraphType.LINE_SYMBOL,
-        }
-        graph_type_enum = graph_type_map.get(graph_type, GraphType.LINE)
-
-        graph_config = GraphConfig(
-            name=config.get("name", "ExtractedDataPlot"),
-            title=config.get("title", "从图表提取的数据"),
-            width=config.get("width", 800),
-            height=config.get("height", 600),
-            x_axis=AxisConfig(title=config.get("x_title", "X")),
-            y_axis=AxisConfig(title=config.get("y_title", "Y"))
-        )
-
+        # 获取导出格式
         export_format_map = {
             "png": ExportFormat.PNG,
+            "jpg": ExportFormat.JPG,
             "pdf": ExportFormat.PDF,
             "svg": ExportFormat.SVG,
+            "eps": ExportFormat.EPS,
+            "emf": ExportFormat.EMF,
         }
         export_format = export_format_map.get(config.get("export_format", "png"), ExportFormat.PNG)
 
-        plot_request = PlotRequest(
-            data=ws_data,
-            graph_type=graph_type_enum,
-            config=graph_config,
-            export_format=export_format
+        # 处理模板路径 - 支持完整路径或内置模板名
+        template = config.get("template", "")
+        if template:
+            # 如果是完整路径且文件存在，使用它
+            if os.path.exists(template):
+                print(f"[Origin] 使用自定义模板文件: {template}")
+            else:
+                print(f"[Origin] 使用内置模板或路径: {template}")
+
+        # 构建完整配置 - 自动使用用户选择的颜色
+        origin_config = OriginGraphConfig(
+            # 文件名自定义
+            filename=config.get("filename", "plot"),
+
+            # 图表基本信息
+            graph_type=config.get("graph_type", "line"),
+            template=template,  # 传递模板路径
+            width=config.get("width", 800),
+            height=config.get("height", 600),
+            title=config.get("title", "从图表提取的数据"),
+            show_origin=config.get("show_origin", False),
+
+            # 导出格式
+            export_format=export_format,
+
+            # 图例设置
+            legend_show=config.get("show_legend", True),
+            legend_position=config.get("legend_position", "top-right"),
+
+            # 网格线
+            show_grid=config.get("show_grid", True),
+
+            # 坐标轴标题
+            x_title=config.get("x_title", "X"),
+            y_title=config.get("y_title", "Y"),
+
+            # 线条样式 - 自动使用用户选择的颜色
+            line_color=config.get("color", "#1f77b4"),
+            line_width=config.get("line_width", 1.5),
+
+            # 坐标轴范围（如果指定）
+            x_min=config.get("x_min"),
+            x_max=config.get("x_max"),
+            y_min=config.get("y_min"),
+            y_max=config.get("y_max"),
+
+            # 抗锯齿
+            anti_alias=config.get("anti_alias", True),
         )
 
-        with OriginPlotter(show_origin=config.get("show_origin", False)) as plotter:
-            result = plotter.plot(plot_request)
+        # 执行绘图
+        result = plot_with_origin(x_data, y_data, origin_config)
+
+        # 如果提供了自定义LabTalk代码，执行它
+        custom_labtalk = config.get("custom_labtalk", "")
+        if custom_labtalk and result.get("success"):
+            try:
+                from origin_plotter import op
+                import time
+                print(f"[Origin] 执行自定义LabTalk代码")
+                op.lt_exec(custom_labtalk)
+                time.sleep(0.5)
+                result["message"] += " (已应用自定义LabTalk)"
+            except Exception as e:
+                print(f"[Origin] 自定义LabTalk执行失败: {e}")
+                result["message"] += f" (自定义代码执行失败: {str(e)})"
 
         return result
 
@@ -1422,4 +1500,14 @@ async def origin_plot_from_extracted(request: dict):
 
 if __name__ == "__main__":
     import uvicorn
+    import webbrowser
+    import threading
+    import time
+
+    def open_browser():
+        time.sleep(1.5)  # Wait for server to start
+        print("Opening browser at http://localhost:8000")
+        webbrowser.open("http://localhost:8000")
+
+    threading.Thread(target=open_browser, daemon=True).start()
     uvicorn.run(app, host="0.0.0.0", port=8000)
