@@ -38,7 +38,12 @@ if getattr(sys, 'frozen', False):
     else:
         base_dir = Path(sys.executable).parent
 else:
-    base_dir = Path(__file__).parent.parent
+    # 优先检查当前目录下的 dist (Docker 部署场景)
+    if (Path(__file__).parent / "dist").exists():
+        base_dir = Path(__file__).parent
+    else:
+        # 开发环境场景 (dist 在 frontend 下)
+        base_dir = Path(__file__).parent.parent
 
 # Frontend dist directory
 dist_dir = base_dir / "dist"
