@@ -6,7 +6,7 @@
 import { useState, useEffect } from 'react'
 import axios from 'axios'
 
-const API_BASE = ''
+const API_BASE = 'http://localhost:8000'
 
 const OriginPlotPanel = ({ extractedData = null, onClose = null }) => {
   // ==================== 状态管理 ====================
